@@ -73,27 +73,30 @@ def main() -> None:
         )
 
         writer = csv.DictWriter(
-            sys.stdout, fieldnames=reader.fieldnames + ["htids"], dialect="excel-tab"
+            sys.stdout, fieldnames=reader.fieldnames + ["ht-recordURLs", "htids"], dialect="excel-tab"
         )
         writer.writeheader()
 
         with (
             requests_cache.CachedSession(args.http_cache, backend="sqlite")
             if args.http_cache
-            else requests.Session
+            else requests.Session()
         ) as session:
             for row in reader:
                 oclc = row.get(args.oclc_column)
                 lccn = row.get(args.lccn_column)
                 isns = row.get(args.isn_column)
-                row["htids"] = pick_items(
-                    get_items(
-                        oclc=oclc[0] if oclc else None,
-                        lccn=lccn[0] if lccn else None,
-                        isns=isns,
-                        session=session,
-                    )
+                result = search_ht(
+                    oclc=oclc[0] if oclc else None,
+                    lccn=lccn[0] if lccn else None,
+                    isns=isns,
+                    session=session,
                 )
+                if result:
+                    row["ht-recordURLs"] = [
+                        record["recordURL"] for record in result["records"].values()
+                    ]
+                    row["htids"] = pick_items(result["items"])
                 writer.writerow({key: "; ".join(values) for key, values in row.items()})
 
 
@@ -132,10 +135,11 @@ def dedupe_enumcron(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [volumes[enumcron] for enumcron in sorted(volumes)]
 
 
-def get_items(
+def search_ht(
     oclc: Optional[str], lccn: Optional[str], isns: list[str], session: requests.Session
-) -> list[dict[str, Any]]:
+) -> Optional[dict[str, Any]]:
     search_order = []
+
     if oclc:
         search_order.append((oclc, "oclc"))
     lccn_num = search_for_lccn(lccn) if lccn else None
@@ -147,13 +151,14 @@ def get_items(
             break
         except ValueError:
             continue
+
     for id_, id_type in search_order:
         result = query_ht_bib_api(
             id_=id_, id_type=id_type, return_type="brief", session=session
         )
         if result["items"]:
-            return result["items"]
-    return []
+            return result
+    return None
 
 
 def search_for_isn(value: str) -> tuple[str, str]:
