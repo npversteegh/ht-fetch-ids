@@ -212,11 +212,16 @@ def search_ht(
 ) -> Optional[dict[str, Any]]:
     search_order = []
 
-    if oclc:
-        search_order.append((oclc, "oclc"))
-    lccn_num = search_for_lccn(lccn) if lccn else None
+    if oclc.strip().isdigit():
+        search_order.append((oclc.strip(), "oclc"))
+
+    try:
+        lccn_num = search_for_lccn(lccn) if lccn else None
+    except ValueError:
+        lccn_num = None
     if lccn_num:
         search_order.append((lccn_num, "lccn"))
+
     for value in isns:
         try:
             search_order.append(search_for_isn(value))
