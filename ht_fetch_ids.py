@@ -9,7 +9,12 @@ import sys
 import io
 from pathlib import Path
 
-from typing import Iterable, Optional, Literal, Any, Iterator
+from typing import Iterable, Optional, Literal, Any, Iterator, Union
+
+
+Item = collections.namedtuple(
+    "Item", "orig fromRecord htid itemURL rightsCode lastUpdate enumcron usRightsString"
+)
 
 
 def main() -> None:
@@ -73,7 +78,10 @@ def main() -> None:
         )
 
         writer = csv.DictWriter(
-            sys.stdout, fieldnames=reader.fieldnames + ["ht-recordURLs", "htids"], dialect="excel-tab"
+            sys.stdout,
+            fieldnames=reader.fieldnames
+            + ["ht-recordURLs", "enumcrons", "group-counts", "htids"],
+            dialect="excel-tab",
         )
         writer.writeheader()
 
@@ -93,46 +101,92 @@ def main() -> None:
                     session=session,
                 )
                 if result:
+                    items = [Item(**item) for item in result["items"]]
                     row["ht-recordURLs"] = [
                         record["recordURL"] for record in result["records"].values()
                     ]
-                    row["htids"] = pick_items(result["items"])
+                    row["enumcrons"] = list(
+                        {item.enumcron for item in items if item.enumcron is not False}
+                    )
+                    groups = group_items_by_origin(items)
+                    row["group-counts"] = [
+                        str(len(group_items)) for group_items in groups.values()
+                    ]
+                    row["htids"] = [item.htid for item in pick_group(groups)]
                 writer.writerow({key: "; ".join(values) for key, values in row.items()})
 
 
-def pick_items(items: list[dict[str, Any]]) -> list[str]:
-    if not items:
+def pick_group(groups: dict[tuple[str, str], list[Item]]) -> list[Item]:
+    if not groups:
         return []
-    origins = collections.defaultdict(list)
+    return max((group for group in groups.values()), key=score_group)
+
+
+def score_group(group: list[Item]) -> float:
+    return float(f"{len(group)}.{most_recent_update(group)}")
+
+
+def most_recent_update(items: Iterable[Item]) -> int:
+    return max(int(item.lastUpdate) for item in items)
+
+
+def group_items_by_origin(items: Iterable[Item]) -> dict[tuple[str, str], list[Item]]:
+    groups = collections.defaultdict(list)
     for item in items:
-        origins[(item["orig"], item["fromRecord"])].append(item)
-    most_recent_updates = {
-        origin: most_recent_update(origin_items)
-        for origin, origin_items in origins.items()
-    }
-    origins_by_updates = sorted(
-        most_recent_updates.items(), key=lambda tpl: tpl[1], reverse=True
-    )
-    return [item["htid"] for item in dedupe_enumcron(origins[origins_by_updates[0][0]])]
+        groups[(item.orig, item.fromRecord)].append(item)
+    return {origin: dedupe_enumcron(group) for origin, group in groups.items()}
 
 
-def most_recent_update(items: list[dict[str, Any]]) -> int:
-    return max(int(item["lastUpdate"]) for item in items)
-
-
-def dedupe_enumcron(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def dedupe_enumcron(items: Iterable[Item]) -> list[Item]:
     volumes = dict()
     for item in items:
-        if item["enumcron"] in volumes:
-            if int(item["lastUpdate"]) < int(volumes[item["enumcron"]]["lastUpdate"]):
+        normalcron = normalize_enumcron(item.enumcron)
+        if normalcron != item.enumcron:
+            print(
+                f"Normalized enumcron {item.enumcron!r} --> {normalcron!r}", file=sys.stderr
+            )
+        if normalcron in volumes:
+            if int(item.lastUpdate) < int(volumes[normalcron].lastUpdate):
                 continue
-        volumes[item["enumcron"]] = item
+        volumes[normalcron] = item
     if False in volumes and len(volumes) > 1:
         print(
-            f"Multivolume set with missing enumcrons, record {volumes[False]['fromRecord']}",
+            f"Multivolume set with missing enumcrons, record {volumes[False].fromRecord}",
             file=sys.stderr,
         )
-    return [volumes[enumcron] for enumcron in sorted(volumes)]
+    return list(volumes.values())
+
+
+def normalize_enumcron(enumcron: Union[str, bool]) -> Union[str, bool]:
+    if enumcron is False:
+        return False
+    return zap_copy_number(enumcron)
+
+
+def zap_copy_number(enumcron: str) -> Union[str, bool]:
+    zapped = re.sub(r"c(opy)?[\. ]?\d+", "", enumcron).strip()
+    return zapped if zapped.strip("[](){}<>, -") else False
+
+
+assert zap_copy_number("c.1 v.2") == "v.2"
+assert zap_copy_number("copy 2") == False
+assert zap_copy_number("[copy 2]") == False
+assert zap_copy_number("c.2") == False
+
+
+def is_copy(enumcron: str) -> bool:
+    normal = "".join(enumcron.split(" ")).strip("[](){}<>")
+    return bool(
+        any(re.match(regex, normal) for regex in [r"^copy\d+$", r"^c.\d+$", r"^---$"])
+    )
+
+
+assert is_copy("copy 2")
+assert is_copy("[copy 2]")
+assert is_copy("c.1")
+assert is_copy("c. 1")
+assert is_copy("---")
+assert not is_copy("c.1 v.1")
 
 
 def search_ht(
