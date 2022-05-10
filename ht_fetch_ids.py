@@ -15,7 +15,9 @@ from typing import Iterable, Optional, Literal, Any, Iterator, Union
 Item = collections.namedtuple(
     "Item", "orig fromRecord htid itemURL rightsCode lastUpdate enumcron usRightsString"
 )
-
+BriefRecord = collections.namedtuple(
+    "BriefRecord", "recordnumber recordURL titles isbns issns oclcs, lccns publishDates"
+)
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -101,7 +103,7 @@ def main() -> None:
                     session=session,
                 )
                 if result:
-                    items = [Item(**item) for item in result["items"]]
+                    items = [Item(**item_args) for item_args in result["items"]]
                     row["ht-recordURLs"] = [
                         record["recordURL"] for record in result["records"].values()
                     ]
@@ -116,6 +118,20 @@ def main() -> None:
                 writer.writerow({key: "; ".join(values) for key, values in row.items()})
 
 
+def parse_results(result: dict[str, Any]) -> list[tuple[BriefRecord, list[Item]]]:
+    records_and_items = []
+    for recordnumber, record_data in result["records"].items():
+        record = BriefRecord(recordnumber=recordnumber, **record_data)
+        items = [Item(**item_data) for item_data in result["items"] if item_data["fromRecord"] == recordnumber]
+        records_and_items.append((record, items))
+    assert sum(len(items) for _, items in records_and_items) == len(result["items"])
+    return records_and_items
+
+
+def pick_record_and_items(records_and_items: list[tuple[BriefRecord, list[Item]]]) -> tuple[BriefRecord, list[Item]]:
+    return max(records_and_items, key=lambda r_and_i: len(r_and_i[1]))
+
+
 def pick_group(groups: dict[tuple[str, str], list[Item]]) -> list[Item]:
     if not groups:
         return []
@@ -123,7 +139,9 @@ def pick_group(groups: dict[tuple[str, str], list[Item]]) -> list[Item]:
 
 
 def score_group(group: list[Item]) -> float:
-    return float(f"{len(group)}.{most_recent_update(group)}")
+    enumcrons = {item.enumcron for item in group}
+    missing_enumcron_penalty = 1 if False in enumcrons and len(enumcrons) > 1 else 0
+    return float(f"{len(group)}.{most_recent_update(group)}") - missing_enumcron_penalty
 
 
 def most_recent_update(items: Iterable[Item]) -> int:
@@ -164,7 +182,7 @@ def normalize_enumcron(enumcron: Union[str, bool]) -> Union[str, bool]:
 
 
 def zap_copy_number(enumcron: str) -> Union[str, bool]:
-    zapped = re.sub(r"c(opy)?[\. ]?\d+", "", enumcron).strip()
+    zapped = re.sub(r"(^|\W)c(opy)?[\. ]?\d+", "", enumcron).strip()
     return zapped if zapped.strip("[](){}<>, -") else False
 
 
@@ -172,7 +190,7 @@ assert zap_copy_number("c.1 v.2") == "v.2"
 assert zap_copy_number("copy 2") == False
 assert zap_copy_number("[copy 2]") == False
 assert zap_copy_number("c.2") == False
-
+assert zap_copy_number("Dec 1999") == "Dec 1999"
 
 def is_copy(enumcron: str) -> bool:
     normal = "".join(enumcron.split(" ")).strip("[](){}<>")
