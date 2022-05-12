@@ -4,6 +4,7 @@ import requests_cache
 import csv
 import argparse
 import collections
+import dataclasses
 import re
 import sys
 import io
@@ -18,6 +19,7 @@ Item = collections.namedtuple(
 BriefRecord = collections.namedtuple(
     "BriefRecord", "recordnumber recordURL titles isbns issns oclcs, lccns publishDates"
 )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -64,11 +66,23 @@ def main() -> None:
         help="Sierra export ISBN/ISSN column name",
     )
     parser.add_argument(
+        "--volume-column",
+        type=str,
+        default="VOLUME",
+        help="Sierra export volume designators column name",
+    )
+    parser.add_argument(
+        "--match-volumes",
+        action="store_true",
+        help="Try to match volume holdings against HT enumcrons",
+    )
+    parser.add_argument(
         "--http-cache",
         type=Path,
         default=None,
         help="Path to optional http requests cache",
     )
+    # TODO: add volume number matching for journal holdings?
     args = parser.parse_args()
 
     with open(args.export_path, mode="r", encoding="utf-8") as fp:
@@ -96,6 +110,7 @@ def main() -> None:
                 oclc = row.get(args.oclc_column)
                 lccn = row.get(args.lccn_column)
                 isns = row.get(args.isn_column)
+                vols = row.get(args.volume_column)
                 result = search_ht(
                     oclc=oclc[0] if oclc else None,
                     lccn=lccn[0] if lccn else None,
@@ -107,29 +122,129 @@ def main() -> None:
                     row["ht-recordURLs"] = [
                         record["recordURL"] for record in result["records"].values()
                     ]
-                    row["enumcrons"] = list(
-                        {item.enumcron for item in items if item.enumcron is not False}
-                    )
+                    enumcrons = {
+                        item.enumcron for item in items if item.enumcron is not False
+                    }
+                    row["enumcrons"] = list(enumcrons)
                     groups = group_items_by_origin(items)
                     row["group-counts"] = [
                         str(len(group_items)) for group_items in groups.values()
                     ]
-                    row["htids"] = [item.htid for item in pick_group(groups)]
+                    if args.match_volumes and enumcrons and row[args.volume_column]:
+                        selected_items = pick_volumes(items, row[args.volume_column])
+                    else:
+                        selected_items = pick_group(groups)
+                    row["htids"] = [item.htid for item in selected_items]
                 writer.writerow({key: "; ".join(values) for key, values in row.items()})
 
 
-def parse_results(result: dict[str, Any]) -> list[tuple[BriefRecord, list[Item]]]:
-    records_and_items = []
-    for recordnumber, record_data in result["records"].items():
-        record = BriefRecord(recordnumber=recordnumber, **record_data)
-        items = [Item(**item_data) for item_data in result["items"] if item_data["fromRecord"] == recordnumber]
-        records_and_items.append((record, items))
-    assert sum(len(items) for _, items in records_and_items) == len(result["items"])
-    return records_and_items
+def pick_volumes(items: list[Item], holdings: list[str]) -> list[Item]:
+    held_enumcrons = [extract_enumcron(holding) for holding in set(holdings)]
+    ht_enumcrons = dict()
+    for item in items:
+        if not item.enumcron:
+            continue
+        ht_enumcron = extract_enumcron(item.enumcron)
+        if ht_enumcron in ht_enumcrons:
+            if int(item.lastUpdate) < int(ht_enumcrons[ht_enumcron].lastUpdate):
+                continue
+        ht_enumcrons[ht_enumcron] = item
+    volumes = []
+    for held_enumcron in held_enumcrons:
+        try:
+            volumes.append(ht_enumcrons[held_enumcron])
+        except KeyError:
+            print(f"Volume match miss {held_enumcron}", file=sys.stderr)
+            breakpoint()
+    if len(holdings) < len(volumes):
+        print(f"Missed {len(holdings) - len(volumes)} volumes of {len(volumes)}", file=sys.stderr)
+    return volumes
 
 
-def pick_record_and_items(records_and_items: list[tuple[BriefRecord, list[Item]]]) -> tuple[BriefRecord, list[Item]]:
-    return max(records_and_items, key=lambda r_and_i: len(r_and_i[1]))
+@dataclasses.dataclass(frozen=True)
+class Enumcron:
+    volumespan: Optional[tuple[str, Optional[str]]] = None
+    numberspan: Optional[tuple[str, Optional[str]]] = None
+    partspan: Optional[tuple[str, Optional[str]]] = None
+    seriesspan: Optional[tuple[str, Optional[str]]] = None
+    datespan: Optional[tuple[str, Optional[str]]] = None
+    copyspan: Optional[tuple[str, Optional[str]]] = dataclasses.field(
+        default=None, compare=False
+    )
+    is_index: bool = False
+    is_supplement: bool = False
+    remainder: Optional[str] = dataclasses.field(default=None, compare=False)
+
+
+def extract_enumcron(enumcron: str) -> Enumcron:
+    if enumcron.isdigit() and int(enumcron) < 1000:
+        return Enumcron(volumespan=(enumcron, None))
+    patterns = {
+        "volumespan": r"v(?:ol)?\.? ?(\d+)(?:-(\d+))?,?",
+        "numberspan": r"(?:^|[^a-z])n(?:o)?\.? ?(\d+)(?:-(\d+))?,?",
+        "partspan": r"p(?:t)?\.? ?(\d+)(?:-(\d+))?,?",
+        "seriesspan": r"(nser|n\.s\.)|(?:(?:^|[^a-z])s(?:er)?\.? ?(\d+)(?:-(\d+))?),?",
+        "copyspan": r"(?:^|[^a-z])c(?:(?:opy)|(?:p))?\.? ?(\d+)(?:-(\d+))?,?",
+        "is_index": r"(index:?)",
+        "is_supplement": r"(suppl\.?)",
+        "datespan": r"(?:(?:yr\. ?)?(\d{4})(?:[-/ ](\d+))?)",
+    }
+
+    kwargs = {}
+    remainder = translate_to_english(enumcron)
+    for argname, pattern in patterns.items():
+        remainder, match = search_and_remove(pattern, remainder)
+        kwargs[argname] = match.groups() if match else None
+
+    if kwargs["seriesspan"]:
+        no_series, start, end = kwargs["seriesspan"]
+        kwargs["seriesspan"] = None if no_series else (start, end)
+
+    if kwargs["datespan"]:
+        start, end = kwargs["datespan"]
+        if end and len(end) == 2:
+            end = start[:2] + end
+        kwargs["datespan"] = start, end
+
+    kwargs["is_index"] = bool(kwargs["is_index"])
+    kwargs["is_supplement"] = bool(kwargs["is_supplement"])
+
+    remainder = remainder.strip(" ,()[]")
+    kwargs["remainder"] = remainder or None
+
+    return Enumcron(**kwargs)
+
+
+def search_and_remove(pattern: str, s: str) -> tuple[str, Optional[re.Match]]:
+    match = re.search(pattern, s.casefold())
+    if match is None:
+        return s, None
+    return s[: match.start()] + " " + s[match.end() :], match
+
+
+def translate_to_english(enumcron: str) -> str:
+    translations = {
+        "jahrg": "v",
+        "Jahrg": "v",
+        "bd": "pt",
+    }
+    translated = enumcron
+    for foreign, english in translations.items():
+        translated = translated.replace(foreign, english)
+    return translated
+
+
+assert extract_enumcron("v.1") == Enumcron(volumespan=("1", None))
+assert extract_enumcron("v. 1") == Enumcron(volumespan=("1", None))
+assert extract_enumcron("V. 123") == Enumcron(volumespan=("123", None))
+assert extract_enumcron("NO. 1") == Enumcron(numberspan=("1", None))
+assert extract_enumcron("pt. 1") == Enumcron(partspan=("1", None))
+assert extract_enumcron("1900") == Enumcron(datespan=("1900", None))
+assert extract_enumcron("1926-27") == Enumcron(datespan=("1926", "1927"))
+assert extract_enumcron("2002-2003") == Enumcron(datespan=("2002", "2003"))
+assert extract_enumcron("v.1, 1900") == Enumcron(
+    volumespan=("1", None), datespan=("1900", None)
+)
 
 
 def pick_group(groups: dict[tuple[str, str], list[Item]]) -> list[Item]:
@@ -161,7 +276,8 @@ def dedupe_enumcron(items: Iterable[Item]) -> list[Item]:
         normalcron = normalize_enumcron(item.enumcron)
         if normalcron != item.enumcron:
             print(
-                f"Normalized enumcron {item.enumcron!r} --> {normalcron!r}", file=sys.stderr
+                f"Normalized enumcron {item.enumcron!r} --> {normalcron!r}",
+                file=sys.stderr,
             )
         if normalcron in volumes:
             if int(item.lastUpdate) < int(volumes[normalcron].lastUpdate):
@@ -192,27 +308,13 @@ assert zap_copy_number("[copy 2]") == False
 assert zap_copy_number("c.2") == False
 assert zap_copy_number("Dec 1999") == "Dec 1999"
 
-def is_copy(enumcron: str) -> bool:
-    normal = "".join(enumcron.split(" ")).strip("[](){}<>")
-    return bool(
-        any(re.match(regex, normal) for regex in [r"^copy\d+$", r"^c.\d+$", r"^---$"])
-    )
-
-
-assert is_copy("copy 2")
-assert is_copy("[copy 2]")
-assert is_copy("c.1")
-assert is_copy("c. 1")
-assert is_copy("---")
-assert not is_copy("c.1 v.1")
-
 
 def search_ht(
     oclc: Optional[str], lccn: Optional[str], isns: list[str], session: requests.Session
 ) -> Optional[dict[str, Any]]:
     search_order = []
 
-    if oclc.strip().isdigit():
+    if oclc and oclc.strip().isdigit():
         search_order.append((oclc.strip(), "oclc"))
 
     try:
