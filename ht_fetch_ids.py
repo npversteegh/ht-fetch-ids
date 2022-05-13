@@ -8,9 +8,10 @@ import dataclasses
 import re
 import sys
 import io
+import datetime
 from pathlib import Path
 
-from typing import Iterable, Optional, Literal, Any, Iterator, Union
+from typing import Iterable, Optional, Literal, Any, Iterator, Union, Callable
 
 
 Item = collections.namedtuple(
@@ -21,7 +22,7 @@ BriefRecord = collections.namedtuple(
 )
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Get HathiTrust htids based on Sierra Create List exports"
     )
@@ -82,7 +83,6 @@ def main() -> None:
         default=None,
         help="Path to optional http requests cache",
     )
-    # TODO: add volume number matching for journal holdings?
     args = parser.parse_args()
 
     with open(args.export_path, mode="r", encoding="utf-8") as fp:
@@ -96,7 +96,9 @@ def main() -> None:
         writer = csv.DictWriter(
             sys.stdout,
             fieldnames=reader.fieldnames
-            + ["ht-recordURLs", "enumcrons", "group-counts", "htids"],
+            + ["ht-recordURLs", "enumcrons", "group-counts"]
+            + (["volume-match-pct"] if args.match_volumes else [])
+            + ["htids"],
             dialect="excel-tab",
         )
         writer.writeheader()
@@ -131,88 +133,182 @@ def main() -> None:
                         str(len(group_items)) for group_items in groups.values()
                     ]
                     if args.match_volumes and enumcrons and row[args.volume_column]:
-                        selected_items = pick_volumes(items, row[args.volume_column])
+                        selected_items = pick_volumes(
+                            items, row[args.volume_column], match_volume_range
+                        )
+                        row[
+                            "volume-match-pct"
+                        ] = [f"{(len(selected_items) / len(set(row[args.volume_column]))) * 100:.1f}"]
                     else:
                         selected_items = pick_group(groups)
                     row["htids"] = [item.htid for item in selected_items]
                 writer.writerow({key: "; ".join(values) for key, values in row.items()})
+    return 0
 
 
-def pick_volumes(items: list[Item], holdings: list[str]) -> list[Item]:
+def pick_volumes(
+    items: list[Item],
+    holdings: list[str],
+    matcher: Callable[["Enumcron", "Enumcron"], bool],
+) -> list[Item]:
+    if not holdings:
+        raise ValueError("no holdings provided")
+    if not items:
+        raise ValueError("no items to match")
     held_enumcrons = [extract_enumcron(holding) for holding in set(holdings)]
     ht_enumcrons = dict()
     for item in items:
-        if not item.enumcron:
-            continue
         ht_enumcron = extract_enumcron(item.enumcron)
         if ht_enumcron in ht_enumcrons:
             if int(item.lastUpdate) < int(ht_enumcrons[ht_enumcron].lastUpdate):
                 continue
         ht_enumcrons[ht_enumcron] = item
-    volumes = []
+    matches = set()
     for held_enumcron in held_enumcrons:
-        try:
-            volumes.append(ht_enumcrons[held_enumcron])
-        except KeyError:
-            print(f"Volume match miss {held_enumcron}", file=sys.stderr)
-            breakpoint()
-    if len(holdings) < len(volumes):
-        print(f"Missed {len(holdings) - len(volumes)} volumes of {len(volumes)}", file=sys.stderr)
-    return volumes
+        for ht_enumcron, item in ht_enumcrons.items():
+            if matcher(held_enumcron, ht_enumcron):
+                matches.add(ht_enumcron)
+    if len(matches) < len(held_enumcrons):
+        print(
+            f"Missed {len(held_enumcrons) - len(matches)} volumes of {len(held_enumcrons)}",
+            file=sys.stderr,
+        )
+    return [ht_enumcrons[match] for match in matches]
+
+
+def match_volume_exact(first: "Enumcron", second: "Enumcron") -> bool:
+    return first == second
+
+
+def match_volume_range(first: "Enumcron", second: "Enumcron") -> bool:
+    if first.volumespan and second.volumespan:
+        return match_spans(first.volumespan, second.volumespan)
+    if first.numberspan and second.numberspan:
+        return match_spans(first.numberspan, second.numberspan)
+    if first.datespan and second.datespan:
+        return match_spans(first.datespan, second.datespan)
+    if first == Enumcron() and second == Enumcron():
+        return True
+    return False
+
+
+def match_spans(first: tuple[int, int], second: tuple[int, int]) -> bool:
+    return bool(first[0] <= second[1] and first[1] >= second[0])
 
 
 @dataclasses.dataclass(frozen=True)
 class Enumcron:
-    volumespan: Optional[tuple[str, Optional[str]]] = None
-    numberspan: Optional[tuple[str, Optional[str]]] = None
-    partspan: Optional[tuple[str, Optional[str]]] = None
-    seriesspan: Optional[tuple[str, Optional[str]]] = None
-    datespan: Optional[tuple[str, Optional[str]]] = None
-    copyspan: Optional[tuple[str, Optional[str]]] = dataclasses.field(
-        default=None, compare=False
-    )
+    volumespan: Optional[tuple[int, int]] = None
+    partspan: Optional[tuple[int, int]] = None
+    numberspan: Optional[tuple[int, int]] = None
+    seriesspan: Optional[tuple[int, int]] = dataclasses.field(default=None, compare=False)
+    datespan: Optional[tuple[int, int]] = None
+    copyspan: Optional[tuple[int, int]] = dataclasses.field(default=None, compare=False)
     is_index: bool = False
     is_supplement: bool = False
     remainder: Optional[str] = dataclasses.field(default=None, compare=False)
 
 
 def extract_enumcron(enumcron: str) -> Enumcron:
+    if not enumcron:
+        return Enumcron()
     if enumcron.isdigit() and int(enumcron) < 1000:
-        return Enumcron(volumespan=(enumcron, None))
-    patterns = {
-        "volumespan": r"v(?:ol)?\.? ?(\d+)(?:-(\d+))?,?",
-        "numberspan": r"(?:^|[^a-z])n(?:o)?\.? ?(\d+)(?:-(\d+))?,?",
-        "partspan": r"p(?:t)?\.? ?(\d+)(?:-(\d+))?,?",
-        "seriesspan": r"(nser|n\.s\.)|(?:(?:^|[^a-z])s(?:er)?\.? ?(\d+)(?:-(\d+))?),?",
-        "copyspan": r"(?:^|[^a-z])c(?:(?:opy)|(?:p))?\.? ?(\d+)(?:-(\d+))?,?",
-        "is_index": r"(index:?)",
-        "is_supplement": r"(suppl\.?)",
-        "datespan": r"(?:(?:yr\. ?)?(\d{4})(?:[-/ ](\d+))?)",
-    }
+        return Enumcron(volumespan=(int(enumcron), int(enumcron)))
 
-    kwargs = {}
     remainder = translate_to_english(enumcron)
-    for argname, pattern in patterns.items():
-        remainder, match = search_and_remove(pattern, remainder)
-        kwargs[argname] = match.groups() if match else None
-
-    if kwargs["seriesspan"]:
-        no_series, start, end = kwargs["seriesspan"]
-        kwargs["seriesspan"] = None if no_series else (start, end)
-
-    if kwargs["datespan"]:
-        start, end = kwargs["datespan"]
-        if end and len(end) == 2:
-            end = start[:2] + end
-        kwargs["datespan"] = start, end
-
-    kwargs["is_index"] = bool(kwargs["is_index"])
-    kwargs["is_supplement"] = bool(kwargs["is_supplement"])
+    remainder, volumespan = extract_volumespan(remainder)
+    remainder, partspan = extract_partspan(remainder)
+    remainder, numberspan = extract_numberspan(remainder)
+    remainder, seriesspan = extract_seriesspan(remainder)
+    remainder, datespan = extract_datespan(remainder)
+    remainder, copyspan = extract_copyspan(remainder)
+    remainder, is_index = extract_is_index(remainder)
+    remainder, is_supplement = extract_is_supplement(remainder)
 
     remainder = remainder.strip(" ,()[]")
-    kwargs["remainder"] = remainder or None
+    remainder = remainder or None
 
-    return Enumcron(**kwargs)
+    return Enumcron(
+        volumespan=volumespan,
+        partspan=partspan,
+        numberspan=numberspan,
+        seriesspan=seriesspan,
+        datespan=datespan,
+        copyspan=copyspan,
+        is_index=is_index,
+        is_supplement=is_supplement,
+        remainder=remainder,
+    )
+
+
+def extract_volumespan(enumcron: str) -> tuple[str, Optional[tuple[int, int]]]:
+    return extract_simple_span(r"v(?:ol)?\.? ?(\d+)(?:-(\d+))?,?", enumcron)
+
+
+def extract_numberspan(enumcron: str) -> tuple[str, Optional[tuple[int, int]]]:
+    return extract_simple_span(r"(?:^|[^a-z])n(?:o)?\.? ?(\d+)(?:-(\d+))?,?", enumcron)
+
+
+def extract_partspan(enumcron: str) -> tuple[str, Optional[tuple[int, int]]]:
+    return extract_simple_span(r"p(?:t)?\.? ?(\d+)(?:-(\d+))?,?", enumcron)
+
+
+def extract_seriesspan(enumcron: str) -> tuple[str, Optional[tuple[int, int]]]:
+    remainder, match = search_and_remove(
+        r"(nser|n\.s\.)|(?:(?:^|[^a-z])s(?:er)?\.? ?(\d+)(?:-(\d+))?),?", enumcron
+    )
+    if not match:
+        return remainder, None
+    no_series, start, end = match.groups()
+    if no_series:
+        return remainder, None
+    return remainder, (int(start), int(end) if end else int(start))
+
+
+def extract_copyspan(enumcron: str) -> tuple[str, Optional[tuple[int, int]]]:
+    return extract_simple_span(
+        r"(?:^|[^a-z])c(?:(?:opy)|(?:p))?\.? ?(\d+)(?:-(\d+))?,?", enumcron
+    )
+
+
+def extract_datespan(
+    enumcron: str,
+) -> tuple[str, Optional[tuple[datetime.date, datetime.date]]]:
+    remainder, match = search_and_remove(
+        r"(?:(?:yr\. ?)?(\d{4})(?:[-/ ](\d+))?)", enumcron
+    )
+    if not match:
+        return remainder, None
+    start, end = match.groups()
+    if end and len(end) == 2:
+        end = start[:2] + end
+    return (
+        remainder,
+        (
+            datetime.date(year=int(start), month=1, day=1),
+            datetime.date(year=int(end) if end else int(start), month=12, day=31),
+        ),
+    )
+
+
+def extract_simple_span(
+    pattern: str, enumcron: str
+) -> tuple[str, Optional[tuple[int, int]]]:
+    remainder, match = search_and_remove(pattern, enumcron)
+    if not match:
+        return remainder, None
+    start, end = match.groups()
+    return remainder, (int(start), int(end) if end else int(start))
+
+
+def extract_is_index(enumcron: str) -> tuple[str, bool]:
+    remainder, match = search_and_remove(r"(index:?)", enumcron)
+    return remainder, bool(match)
+
+
+def extract_is_supplement(enumcron: str) -> tuple[str, bool]:
+    remainder, match = search_and_remove(r"(suppl\.?)", enumcron)
+    return remainder, bool(match)
 
 
 def search_and_remove(pattern: str, s: str) -> tuple[str, Optional[re.Match]]:
@@ -234,16 +330,22 @@ def translate_to_english(enumcron: str) -> str:
     return translated
 
 
-assert extract_enumcron("v.1") == Enumcron(volumespan=("1", None))
-assert extract_enumcron("v. 1") == Enumcron(volumespan=("1", None))
-assert extract_enumcron("V. 123") == Enumcron(volumespan=("123", None))
-assert extract_enumcron("NO. 1") == Enumcron(numberspan=("1", None))
-assert extract_enumcron("pt. 1") == Enumcron(partspan=("1", None))
-assert extract_enumcron("1900") == Enumcron(datespan=("1900", None))
-assert extract_enumcron("1926-27") == Enumcron(datespan=("1926", "1927"))
-assert extract_enumcron("2002-2003") == Enumcron(datespan=("2002", "2003"))
+assert extract_enumcron("v.1") == Enumcron(volumespan=(1, 1))
+assert extract_enumcron("v. 1") == Enumcron(volumespan=(1, 1))
+assert extract_enumcron("V. 123") == Enumcron(volumespan=(123, 123))
+assert extract_enumcron("NO. 1") == Enumcron(numberspan=(1, 1))
+assert extract_enumcron("pt. 1") == Enumcron(partspan=(1, 1))
+assert extract_enumcron("1900") == Enumcron(
+    datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31))
+)
+assert extract_enumcron("1926-27") == Enumcron(
+    datespan=(datetime.date(1926, 1, 1), datetime.date(1927, 12, 31))
+)
+assert extract_enumcron("2002-2003") == Enumcron(
+    datespan=(datetime.date(2002, 1, 1), datetime.date(2003, 12, 31))
+)
 assert extract_enumcron("v.1, 1900") == Enumcron(
-    volumespan=("1", None), datespan=("1900", None)
+    volumespan=(1, 1), datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31))
 )
 
 
@@ -437,4 +539,4 @@ class SierraExportReader(collections.abc.Iterable):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
