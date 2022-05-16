@@ -140,7 +140,7 @@ def main() -> int:
                             items, row[args.volume_column], range_match_strategy
                         )
                         row["volume-match-pct"] = [
-                            f"{(len(selected_items) / len(set(row[args.volume_column]))) * 100:.1f}"
+                            f"{(len(selected_items) / len(set(extract_enumcron(v) for v in row[args.volume_column]))) * 100:.1f}"
                         ]
                     else:
                         selected_items = pick_group(groups)
@@ -183,13 +183,19 @@ def exact_match_strategy(
     return holdings & ht_enumcrons
 
 
-def range_match_strategy(holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"]) -> str:
+def range_match_strategy(
+    holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"]
+) -> str:
     holdings_range_counts = filled_range_counts(holdings)
     ht_range_counts = filled_range_counts(ht_enumcrons)
     range_attrs = set(holdings_range_counts) & set(ht_range_counts)
     matches = set()
     for attr in range_attrs:
-        matcher = date_range_matches if attr == "datespan" else functools.partial(int_range_maches, range_attr=attr)
+        matcher = (
+            date_range_matches
+            if attr == "datespan"
+            else functools.partial(int_range_maches, range_attr=attr)
+        )
         matches.update(matcher(holdings, ht_enumcrons))
     return matches
 
@@ -245,8 +251,14 @@ def dates_to_year_set(start: datetime.date, end: datetime.date) -> set[str]:
 
 
 def filled_range_counts(enumcrons: Iterable["Enumcron"]) -> collections.Counter:
-    attrs = {"volumespan", "numberspan", "datespan",}
-    return collections.Counter(attr for enumcron in enumcrons for attr in attrs if getattr(enumcron, attr))
+    attrs = {
+        "volumespan",
+        "numberspan",
+        "datespan",
+    }
+    return collections.Counter(
+        attr for enumcron in enumcrons for attr in attrs if getattr(enumcron, attr)
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -267,8 +279,9 @@ class Enumcron:
 def extract_enumcron(enumcron: str) -> Enumcron:
     if not enumcron:
         return Enumcron()
-    if enumcron.strip(" ()").isdigit() and int(enumcron) < 1000:
-        volumenum = int(enumcron.strip(" ()"))
+    asdigit = enumcron.strip(" ()")
+    if asdigit.isdigit() and int(asdigit) < 1000:
+        volumenum = int(asdigit)
         return Enumcron(volumespan=(volumenum, volumenum))
 
     remainder = translate_to_english(enumcron)
