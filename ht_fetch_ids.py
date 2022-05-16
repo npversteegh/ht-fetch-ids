@@ -9,6 +9,7 @@ import re
 import sys
 import io
 import datetime
+import functools
 from pathlib import Path
 
 from typing import Iterable, Optional, Literal, Any, Iterator, Union, Callable
@@ -109,21 +110,23 @@ def main() -> int:
             else requests.Session()
         ) as session:
             for row in reader:
-                oclc = row.get(args.oclc_column)
-                lccn = row.get(args.lccn_column)
+                oclcs = row.get(args.oclc_column)
+                lccns = row.get(args.lccn_column)
                 isns = row.get(args.isn_column)
                 vols = row.get(args.volume_column)
                 result = search_ht(
-                    oclc=oclc[0] if oclc else None,
-                    lccn=lccn[0] if lccn else None,
+                    oclc=oclcs[0] if oclcs else None,
+                    lccn=lccns[0] if lccns else None,
                     isns=isns,
                     session=session,
                 )
                 if result:
-                    items = [Item(**item_args) for item_args in result["items"]]
-                    row["ht-recordURLs"] = [
-                        record["recordURL"] for record in result["records"].values()
+                    records = [
+                        BriefRecord(recordnumber=recordnumber, **record_args)
+                        for recordnumber, record_args in result["records"].items()
                     ]
+                    items = [Item(**item_args) for item_args in result["items"]]
+                    row["ht-recordURLs"] = [record.recordURL for record in records]
                     enumcrons = {
                         item.enumcron for item in items if item.enumcron is not False
                     }
@@ -134,11 +137,11 @@ def main() -> int:
                     ]
                     if args.match_volumes and enumcrons and row[args.volume_column]:
                         selected_items = pick_volumes(
-                            items, row[args.volume_column], match_volume_range
+                            items, row[args.volume_column], range_match_strategy
                         )
-                        row[
-                            "volume-match-pct"
-                        ] = [f"{(len(selected_items) / len(set(row[args.volume_column]))) * 100:.1f}"]
+                        row["volume-match-pct"] = [
+                            f"{(len(selected_items) / len(set(row[args.volume_column]))) * 100:.1f}"
+                        ]
                     else:
                         selected_items = pick_group(groups)
                     row["htids"] = [item.htid for item in selected_items]
@@ -149,12 +152,13 @@ def main() -> int:
 def pick_volumes(
     items: list[Item],
     holdings: list[str],
-    matcher: Callable[["Enumcron", "Enumcron"], bool],
+    strategy: Callable[[set["Enumcron"], set["Enumcron"]], set["Enumcron"]],
 ) -> list[Item]:
     if not holdings:
         raise ValueError("no holdings provided")
     if not items:
         raise ValueError("no items to match")
+
     held_enumcrons = [extract_enumcron(holding) for holding in set(holdings)]
     ht_enumcrons = dict()
     for item in items:
@@ -163,11 +167,8 @@ def pick_volumes(
             if int(item.lastUpdate) < int(ht_enumcrons[ht_enumcron].lastUpdate):
                 continue
         ht_enumcrons[ht_enumcron] = item
-    matches = set()
-    for held_enumcron in held_enumcrons:
-        for ht_enumcron, item in ht_enumcrons.items():
-            if matcher(held_enumcron, ht_enumcron):
-                matches.add(ht_enumcron)
+
+    matches = strategy(set(held_enumcrons), set(ht_enumcrons))
     if len(matches) < len(held_enumcrons):
         print(
             f"Missed {len(held_enumcrons) - len(matches)} volumes of {len(held_enumcrons)}",
@@ -176,24 +177,76 @@ def pick_volumes(
     return [ht_enumcrons[match] for match in matches]
 
 
-def match_volume_exact(first: "Enumcron", second: "Enumcron") -> bool:
-    return first == second
+def exact_match_strategy(
+    holdings: set["Eunmcron"], ht_enumcrons: set["Enumcron"]
+) -> set["Enumcron"]:
+    return holdings & ht_enumcrons
 
 
-def match_volume_range(first: "Enumcron", second: "Enumcron") -> bool:
-    if first.volumespan and second.volumespan:
-        return match_spans(first.volumespan, second.volumespan)
-    if first.numberspan and second.numberspan:
-        return match_spans(first.numberspan, second.numberspan)
-    if first.datespan and second.datespan:
-        return match_spans(first.datespan, second.datespan)
-    if first == Enumcron() and second == Enumcron():
-        return True
-    return False
+def range_match_strategy(holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"]) -> str:
+    holdings_range_counts = filled_range_counts(holdings)
+    ht_range_counts = filled_range_counts(ht_enumcrons)
+    range_attrs = set(holdings_range_counts) & set(ht_range_counts)
+    matches = set()
+    for attr in range_attrs:
+        matcher = date_range_matches if attr == "datespan" else functools.partial(int_range_maches, range_attr=attr)
+        matches.update(matcher(holdings, ht_enumcrons))
+    return matches
 
 
-def match_spans(first: tuple[int, int], second: tuple[int, int]) -> bool:
-    return bool(first[0] <= second[1] and first[1] >= second[0])
+def int_range_maches(
+    holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"], range_attr: str
+) -> set["Enumcron"]:
+    holdings_range = set()
+    for holding in holdings:
+        try:
+            start, end = getattr(holding, range_attr)
+        except TypeError:
+            continue
+        holdings_range.update(set(range(start, end + 1)))
+    matches = set()
+    for ht_enumcron in ht_enumcrons:
+        try:
+            start, end = getattr(ht_enumcron, range_attr)
+        except TypeError:
+            continue
+        ht_range = set(range(start, end + 1))
+        if holdings_range & ht_range:
+            holdings_range -= ht_range
+            matches.add(ht_enumcron)
+    return matches
+
+
+def date_range_matches(
+    holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"]
+) -> set["Enumcron"]:
+    holdings_range = set()
+    for holding in holdings:
+        try:
+            start, end = holding.datespan
+        except TypeError:
+            continue
+        holdings_range.update(dates_to_year_set(start, end))
+    matches = set()
+    for ht_enumcron in ht_enumcrons:
+        try:
+            start, end = ht_enumcron.datespan
+        except TypeError:
+            continue
+        ht_range = dates_to_year_set(start, end)
+        if holdings_range & ht_range:
+            holdings_range -= ht_range
+            matches.add(ht_enumcron)
+    return matches
+
+
+def dates_to_year_set(start: datetime.date, end: datetime.date) -> set[str]:
+    return set(range(start.year, end.year + 1))
+
+
+def filled_range_counts(enumcrons: Iterable["Enumcron"]) -> collections.Counter:
+    attrs = {"volumespan", "numberspan", "datespan",}
+    return collections.Counter(attr for enumcron in enumcrons for attr in attrs if getattr(enumcron, attr))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -201,7 +254,9 @@ class Enumcron:
     volumespan: Optional[tuple[int, int]] = None
     partspan: Optional[tuple[int, int]] = None
     numberspan: Optional[tuple[int, int]] = None
-    seriesspan: Optional[tuple[int, int]] = dataclasses.field(default=None, compare=False)
+    seriesspan: Optional[tuple[int, int]] = dataclasses.field(
+        default=None, compare=False
+    )
     datespan: Optional[tuple[int, int]] = None
     copyspan: Optional[tuple[int, int]] = dataclasses.field(default=None, compare=False)
     is_index: bool = False
@@ -212,8 +267,9 @@ class Enumcron:
 def extract_enumcron(enumcron: str) -> Enumcron:
     if not enumcron:
         return Enumcron()
-    if enumcron.isdigit() and int(enumcron) < 1000:
-        return Enumcron(volumespan=(int(enumcron), int(enumcron)))
+    if enumcron.strip(" ()").isdigit() and int(enumcron) < 1000:
+        volumenum = int(enumcron.strip(" ()"))
+        return Enumcron(volumespan=(volumenum, volumenum))
 
     remainder = translate_to_english(enumcron)
     remainder, volumespan = extract_volumespan(remainder)
