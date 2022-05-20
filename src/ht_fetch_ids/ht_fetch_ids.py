@@ -12,15 +12,36 @@ import datetime
 import functools
 from pathlib import Path
 
-from typing import Iterable, Optional, Literal, Any, Iterator, Union, Callable
+from typing import Iterable, Optional, Literal, Any, Iterator, Union, Callable, Hashable
 
 
 Item = collections.namedtuple(
     "Item", "orig fromRecord htid itemURL rightsCode lastUpdate enumcron usRightsString"
 )
+
+
 BriefRecord = collections.namedtuple(
     "BriefRecord", "recordnumber recordURL titles isbns issns oclcs, lccns publishDates"
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class Enumcron:
+    volumespan: Optional[tuple[int, int]] = None
+    partspan: Optional[tuple[int, int]] = None
+    numberspan: Optional[tuple[int, int]] = None
+    seriesspan: Optional[tuple[int, int]] = dataclasses.field(
+        default=None, compare=False
+    )
+    datespan: Optional[tuple[int, int]] = None
+    copyspan: Optional[tuple[int, int]] = dataclasses.field(default=None, compare=False)
+    is_index: bool = False
+    is_supplement: bool = False
+    remainder: Optional[str] = dataclasses.field(default=None, compare=False)
+
+
+MatchStrategy = Callable[[set[Enumcron], set[Enumcron]], set[Enumcron]]
+MATCH_STRATEGIES: dict[str, MatchStrategy] = dict()
 
 
 def main() -> int:
@@ -74,9 +95,9 @@ def main() -> int:
         help="Sierra export volume designators column name",
     )
     parser.add_argument(
-        "--match-volumes",
-        action="store_true",
-        help="Try to match volume holdings against HT enumcrons",
+        "--vol-matcher",
+        choices=list(MATCH_STRATEGIES),
+        help="Strategy for volume matching against HT enumcrons",
     )
     parser.add_argument(
         "--http-cache",
@@ -98,7 +119,7 @@ def main() -> int:
             sys.stdout,
             fieldnames=reader.fieldnames
             + ["ht-recordURLs", "enumcrons", "group-counts"]
-            + (["volume-match-pct"] if args.match_volumes else [])
+            + (["volume-match-pct"] if args.vol_matcher else [])
             + ["htids"],
             dialect="excel-tab",
         )
@@ -135,9 +156,11 @@ def main() -> int:
                     row["group-counts"] = [
                         str(len(group_items)) for group_items in groups.values()
                     ]
-                    if args.match_volumes and enumcrons and row[args.volume_column]:
+                    if args.vol_matcher and enumcrons and row[args.volume_column]:
                         selected_items = pick_volumes(
-                            items, row[args.volume_column], range_match_strategy
+                            items,
+                            row[args.volume_column],
+                            MATCH_STRATEGIES[args.vol_matcher],
                         )
                         row["volume-match-pct"] = [
                             f"{(len(selected_items) / len(set(extract_enumcron(v) for v in row[args.volume_column]))) * 100:.1f}"
@@ -150,9 +173,7 @@ def main() -> int:
 
 
 def pick_volumes(
-    items: list[Item],
-    holdings: list[str],
-    strategy: Callable[[set["Enumcron"], set["Enumcron"]], set["Enumcron"]],
+    items: list[Item], holdings: list[str], strategy: MatchStrategy,
 ) -> list[Item]:
     if not holdings:
         raise ValueError("no holdings provided")
@@ -177,32 +198,49 @@ def pick_volumes(
     return [ht_enumcrons[match] for match in matches]
 
 
+def match_strategy(argname: str) -> Callable[[MatchStrategy], MatchStrategy]:
+    def match_strategy_decorator(func: MatchStrategy) -> MatchStrategy:
+        assert (
+            argname not in MATCH_STRATEGIES
+        ), f"volume match strategy name collision {argname!r}"
+        MATCH_STRATEGIES[argname] = func
+        return func
+
+    return match_strategy_decorator
+
+
+@match_strategy("exact")
 def exact_match_strategy(
-    holdings: set["Eunmcron"], ht_enumcrons: set["Enumcron"]
-) -> set["Enumcron"]:
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
+) -> set[Enumcron]:
     return holdings & ht_enumcrons
 
 
-def range_match_strategy(
-    holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"]
-) -> str:
-    holdings_range_counts = filled_range_counts(holdings)
-    ht_range_counts = filled_range_counts(ht_enumcrons)
-    range_attrs = set(holdings_range_counts) & set(ht_range_counts)
-    matches = set()
-    for attr in range_attrs:
-        matcher = (
-            date_range_matches
-            if attr == "datespan"
-            else functools.partial(int_range_maches, range_attr=attr)
-        )
-        matches.update(matcher(holdings, ht_enumcrons))
-    return matches
+@match_strategy("range")
+def range_match_strategy(holdings: set[Enumcron], ht_enumcrons: set[Enumcron]) -> str:
+    holdings_range_percents = counts_to_percents(
+        filled_range_counts(holdings), len(holdings)
+    )
+    ht_range_percents = counts_to_percents(
+        filled_range_counts(ht_enumcrons), len(ht_enumcrons)
+    )
+    mutual_range_attrs = set(holdings_range_percents) & set(ht_range_percents)
+    match_on = max(
+        mutual_range_attrs,
+        key=lambda key: holdings_range_percents[key] + ht_range_percents[key],
+    )
+    matcher = (
+        date_range_matches
+        if match_on == "datespan"
+        else functools.partial(int_range_maches, range_attr=match_on)
+    )
+    breakpoint()
+    return matcher(holdings, ht_enumcrons)
 
 
 def int_range_maches(
-    holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"], range_attr: str
-) -> set["Enumcron"]:
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron], range_attr: str
+) -> set[Enumcron]:
     holdings_range = set()
     for holding in holdings:
         try:
@@ -224,8 +262,8 @@ def int_range_maches(
 
 
 def date_range_matches(
-    holdings: set["Enumcron"], ht_enumcrons: set["Enumcron"]
-) -> set["Enumcron"]:
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
+) -> set[Enumcron]:
     holdings_range = set()
     for holding in holdings:
         try:
@@ -250,9 +288,10 @@ def dates_to_year_set(start: datetime.date, end: datetime.date) -> set[str]:
     return set(range(start.year, end.year + 1))
 
 
-def filled_range_counts(enumcrons: Iterable["Enumcron"]) -> collections.Counter:
+def filled_range_counts(enumcrons: Iterable[Enumcron]) -> collections.Counter:
     attrs = {
         "volumespan",
+        "partspan",
         "numberspan",
         "datespan",
     }
@@ -261,19 +300,10 @@ def filled_range_counts(enumcrons: Iterable["Enumcron"]) -> collections.Counter:
     )
 
 
-@dataclasses.dataclass(frozen=True)
-class Enumcron:
-    volumespan: Optional[tuple[int, int]] = None
-    partspan: Optional[tuple[int, int]] = None
-    numberspan: Optional[tuple[int, int]] = None
-    seriesspan: Optional[tuple[int, int]] = dataclasses.field(
-        default=None, compare=False
-    )
-    datespan: Optional[tuple[int, int]] = None
-    copyspan: Optional[tuple[int, int]] = dataclasses.field(default=None, compare=False)
-    is_index: bool = False
-    is_supplement: bool = False
-    remainder: Optional[str] = dataclasses.field(default=None, compare=False)
+def counts_to_percents(
+    counter: collections.Counter, total: int
+) -> dict[Hashable, float]:
+    return {key: (count / total) * 100 for key, count in counter.items()}
 
 
 def extract_enumcron(enumcron: str) -> Enumcron:
