@@ -10,9 +10,10 @@ import sys
 import io
 import datetime
 import functools
+import itertools
 from pathlib import Path
 
-from typing import Iterable, Optional, Literal, Any, Iterator, Union, Callable, Hashable
+from typing import Iterable, Optional, Literal, Any, Iterator, Union, Callable, Hashable, Sequence
 
 
 Item = collections.namedtuple(
@@ -216,8 +217,7 @@ def exact_match_strategy(
     return holdings & ht_enumcrons
 
 
-@match_strategy("range")
-def range_match_strategy(holdings: set[Enumcron], ht_enumcrons: set[Enumcron]) -> str:
+def ranges_matcher(holdings: set[Enumcron], ht_enumcrons: set[Enumcron], n: int) -> set[Enumcron]:
     holdings_range_percents = counts_to_percents(
         filled_range_counts(holdings), len(holdings)
     )
@@ -225,67 +225,42 @@ def range_match_strategy(holdings: set[Enumcron], ht_enumcrons: set[Enumcron]) -
         filled_range_counts(ht_enumcrons), len(ht_enumcrons)
     )
     mutual_range_attrs = set(holdings_range_percents) & set(ht_range_percents)
-    match_on = max(
-        mutual_range_attrs,
-        key=lambda key: holdings_range_percents[key] + ht_range_percents[key],
-    )
-    matcher = (
-        date_range_matches
-        if match_on == "datespan"
-        else functools.partial(int_range_maches, range_attr=match_on)
-    )
-    breakpoint()
-    return matcher(holdings, ht_enumcrons)
-
-
-def int_range_maches(
-    holdings: set[Enumcron], ht_enumcrons: set[Enumcron], range_attr: str
-) -> set[Enumcron]:
-    holdings_range = set()
+    mutual_percents = {attr: holdings_range_percents[attr] + ht_range_percents[attr] for attr in mutual_range_attrs}
+    match_on = [attr[0] for attr in sorted(mutual_percents.items(), key=lambda tpl: tpl[1])][-n:]
+    holdings_set = set()
     for holding in holdings:
-        try:
-            start, end = getattr(holding, range_attr)
-        except TypeError:
-            continue
-        holdings_range.update(set(range(start, end + 1)))
+        holdings_set.update(make_range_set(holding, match_on))
     matches = set()
     for ht_enumcron in ht_enumcrons:
-        try:
-            start, end = getattr(ht_enumcron, range_attr)
-        except TypeError:
-            continue
-        ht_range = set(range(start, end + 1))
-        if holdings_range & ht_range:
-            holdings_range -= ht_range
+        ht_ranges = make_range_set(ht_enumcron, match_on)
+        if ht_ranges <= holdings_set:
+            holdings_set -= ht_ranges
             matches.add(ht_enumcron)
     return matches
 
 
-def date_range_matches(
-    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
-) -> set[Enumcron]:
-    holdings_range = set()
-    for holding in holdings:
-        try:
-            start, end = holding.datespan
-        except TypeError:
-            continue
-        holdings_range.update(dates_to_year_set(start, end))
-    matches = set()
-    for ht_enumcron in ht_enumcrons:
-        try:
-            start, end = ht_enumcron.datespan
-        except TypeError:
-            continue
-        ht_range = dates_to_year_set(start, end)
-        if holdings_range & ht_range:
-            holdings_range -= ht_range
-            matches.add(ht_enumcron)
-    return matches
+@match_strategy("1-range")
+def single_range_match_strategy(holdings: set[Enumcron], ht_enumcrons: set[Enumcron]) -> set[Enumcron]:
+    return ranges_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=1)
 
 
-def dates_to_year_set(start: datetime.date, end: datetime.date) -> set[str]:
-    return set(range(start.year, end.year + 1))
+@match_strategy("2-range")
+def double_range_match_strategy(holdings: set[Enumcron], ht_enumcrons: set[Enumcron]) -> set[Enumcron]:
+    return ranges_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=2)
+
+
+def make_range_set(enumcron: Enumcron, attrs: Sequence[str]) -> set[tuple[int, ...]]:
+    ranges = []
+    for attr in attrs:
+        value = getattr(enumcron, attr)
+        if not value:
+            ranges.append([None])
+            continue
+        start, end = value
+        if isinstance(start, datetime.date) or isinstance(end, datetime.date):
+            start, end = start.year, end.year
+        ranges.append(range(start, end + 1))
+    return set(itertools.product(*ranges))
 
 
 def filled_range_counts(enumcrons: Iterable[Enumcron]) -> collections.Counter:
@@ -293,6 +268,7 @@ def filled_range_counts(enumcrons: Iterable[Enumcron]) -> collections.Counter:
         "volumespan",
         "partspan",
         "numberspan",
+        "seriesspan",
         "datespan",
     }
     return collections.Counter(
