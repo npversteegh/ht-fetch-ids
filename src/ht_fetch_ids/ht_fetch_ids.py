@@ -13,7 +13,17 @@ import functools
 import itertools
 from pathlib import Path
 
-from typing import Iterable, Optional, Literal, Any, Iterator, Union, Callable, Hashable, Sequence
+from typing import (
+    Iterable,
+    Optional,
+    Literal,
+    Any,
+    Iterator,
+    Union,
+    Callable,
+    Hashable,
+    Sequence,
+)
 
 
 Item = collections.namedtuple(
@@ -39,9 +49,10 @@ class Enumcron:
     is_index: bool = False
     is_supplement: bool = False
     remainder: Optional[str] = dataclasses.field(default=None, compare=False)
+    raw: Optional[str] = dataclasses.field(default=None, compare=False)
 
 
-MatchStrategy = Callable[[set[Enumcron], set[Enumcron]], set[Enumcron]]
+MatchStrategy = Callable[[set[Enumcron], set[Enumcron]], dict[Enumcron, set[Enumcron]]]
 MATCH_STRATEGIES: dict[str, MatchStrategy] = dict()
 
 
@@ -66,7 +77,10 @@ def main() -> int:
         help="Sierra export repeated field delimiter",
     )
     parser.add_argument(
-        "--dialect", choices=csv.list_dialects(), default="unix", help="Results format"
+        "--dialect",
+        choices=csv.list_dialects(),
+        default="unix",
+        help="Results CSV format",
     )
     parser.add_argument(
         "--delay", type=int, default=0, help="Seconds of delay between HT API requests"
@@ -98,6 +112,7 @@ def main() -> int:
     parser.add_argument(
         "--vol-matcher",
         choices=list(MATCH_STRATEGIES),
+        default=None,
         help="Strategy for volume matching against HT enumcrons",
     )
     parser.add_argument(
@@ -120,7 +135,7 @@ def main() -> int:
             sys.stdout,
             fieldnames=reader.fieldnames
             + ["ht-recordURLs", "enumcrons", "group-counts"]
-            + (["volume-match-pct"] if args.vol_matcher else [])
+            + (["volume-match-pct", "enumcron-matches"] if args.vol_matcher else [])
             + ["htids"],
             dialect="excel-tab",
         )
@@ -158,13 +173,18 @@ def main() -> int:
                         str(len(group_items)) for group_items in groups.values()
                     ]
                     if args.vol_matcher and enumcrons and row[args.volume_column]:
-                        selected_items = pick_volumes(
+                        selected_items, enumcron_matches = pick_volumes(
                             items,
                             row[args.volume_column],
                             MATCH_STRATEGIES[args.vol_matcher],
                         )
                         row["volume-match-pct"] = [
                             f"{(len(selected_items) / len(set(extract_enumcron(v) for v in row[args.volume_column]))) * 100:.1f}"
+                        ]
+                        row["enumcron-matches"] = [
+                            f"{held.raw}→{ht.raw}"
+                            for held, ht_set in enumcron_matches.items()
+                            for ht in ht_set
                         ]
                     else:
                         selected_items = pick_group(groups)
@@ -174,14 +194,23 @@ def main() -> int:
 
 
 def pick_volumes(
-    items: list[Item], holdings: list[str], strategy: MatchStrategy,
-) -> list[Item]:
+    items: list[Item],
+    holdings: list[str],
+    strategy: MatchStrategy,
+    exclude_indexes: bool = True,
+) -> tuple[list[Item], dict[Enumcron, Enumcron]]:
     if not holdings:
         raise ValueError("no holdings provided")
     if not items:
         raise ValueError("no items to match")
 
     held_enumcrons = [extract_enumcron(holding) for holding in set(holdings)]
+    if exclude_indexes:
+        held_enumcrons = [
+            held_enumcron
+            for held_enumcron in held_enumcrons
+            if not held_enumcron.is_index
+        ]
     ht_enumcrons = dict()
     for item in items:
         ht_enumcron = extract_enumcron(item.enumcron)
@@ -196,7 +225,13 @@ def pick_volumes(
             f"Missed {len(held_enumcrons) - len(matches)} volumes of {len(held_enumcrons)}",
             file=sys.stderr,
         )
-    return [ht_enumcrons[match] for match in matches]
+    return (
+        [
+            ht_enumcrons[ht_enumcron]
+            for ht_enumcron in set(itertools.chain.from_iterable(matches.values()))
+        ],
+        matches,
+    )
 
 
 def match_strategy(argname: str) -> Callable[[MatchStrategy], MatchStrategy]:
@@ -213,11 +248,18 @@ def match_strategy(argname: str) -> Callable[[MatchStrategy], MatchStrategy]:
 @match_strategy("exact")
 def exact_match_strategy(
     holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
-) -> set[Enumcron]:
-    return holdings & ht_enumcrons
+) -> dict[Enumcron, set[Enumcron]]:
+    ht_enumcrons_dict = {ht_enumcron: ht_enumcron for ht_enumcron in ht_enumcrons}
+    return {
+        holding: {ht_enumcrons_dict[ht_enumcron]}
+        for holding in holdings
+        if holding in ht_enumcrons_dict
+    }
 
 
-def ranges_matcher(holdings: set[Enumcron], ht_enumcrons: set[Enumcron], n: int) -> set[Enumcron]:
+def ranges_matcher(
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron], n: int
+) -> dict[Enumcron, set[Enumcron]]:
     holdings_range_percents = counts_to_percents(
         filled_range_counts(holdings), len(holdings)
     )
@@ -225,28 +267,47 @@ def ranges_matcher(holdings: set[Enumcron], ht_enumcrons: set[Enumcron], n: int)
         filled_range_counts(ht_enumcrons), len(ht_enumcrons)
     )
     mutual_range_attrs = set(holdings_range_percents) & set(ht_range_percents)
-    mutual_percents = {attr: holdings_range_percents[attr] + ht_range_percents[attr] for attr in mutual_range_attrs}
-    match_on = [attr[0] for attr in sorted(mutual_percents.items(), key=lambda tpl: tpl[1])][-n:]
-    holdings_set = set()
+    mutual_percents = {
+        attr: holdings_range_percents[attr] + ht_range_percents[attr]
+        for attr in mutual_range_attrs
+    }
+    match_on = [
+        attr[0] for attr in sorted(mutual_percents.items(), key=lambda tpl: tpl[1])
+    ][-n:]
+
+    holdings_by_key = dict()
     for holding in holdings:
-        holdings_set.update(make_range_set(holding, match_on))
-    matches = set()
+        holdings_by_key.update(make_range_dict(holding, match_on))
+
+    ht_enumcrons_by_key = dict()
     for ht_enumcron in ht_enumcrons:
-        ht_ranges = make_range_set(ht_enumcron, match_on)
-        if ht_ranges <= holdings_set:
-            holdings_set -= ht_ranges
-            matches.add(ht_enumcron)
-    return matches
+        ht_enumcrons_by_key.update(make_range_dict(ht_enumcron, match_on))
+
+    matches = collections.defaultdict(set)
+    for key in set(holdings_by_key) & set(ht_enumcrons_by_key):
+        matches[holdings_by_key[key]].add(ht_enumcrons_by_key[key])
+
+    return dict(matches)
 
 
 @match_strategy("1-range")
-def single_range_match_strategy(holdings: set[Enumcron], ht_enumcrons: set[Enumcron]) -> set[Enumcron]:
+def single_range_match_strategy(
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
+) -> dict[Enumcron, set[Enumcron]]:
     return ranges_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=1)
 
 
 @match_strategy("2-range")
-def double_range_match_strategy(holdings: set[Enumcron], ht_enumcrons: set[Enumcron]) -> set[Enumcron]:
+def double_range_match_strategy(
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
+) -> dict[Enumcron, set[Enumcron]]:
     return ranges_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=2)
+
+
+def make_range_dict(
+    enumcron: Enumcron, attrs: Sequence[str]
+) -> dict[tuple[int, ...], Enumcron]:
+    return {key: enumcron for key in make_range_set(enumcron, attrs=attrs)}
 
 
 def make_range_set(enumcron: Enumcron, attrs: Sequence[str]) -> set[tuple[int, ...]]:
@@ -288,7 +349,7 @@ def extract_enumcron(enumcron: str) -> Enumcron:
     asdigit = enumcron.strip(" ()")
     if asdigit.isdigit() and int(asdigit) < 1000:
         volumenum = int(asdigit)
-        return Enumcron(volumespan=(volumenum, volumenum))
+        return Enumcron(volumespan=(volumenum, volumenum), raw=enumcron)
 
     remainder = translate_to_english(enumcron)
     remainder, volumespan = extract_volumespan(remainder)
@@ -313,6 +374,7 @@ def extract_enumcron(enumcron: str) -> Enumcron:
         is_index=is_index,
         is_supplement=is_supplement,
         remainder=remainder,
+        raw=enumcron,
     )
 
 

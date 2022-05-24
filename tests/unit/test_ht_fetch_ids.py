@@ -1,48 +1,70 @@
 import pytest
 
 import datetime
+import collections
 
 from ht_fetch_ids import ht_fetch_ids as hfi
 
 
 @pytest.mark.parametrize(
-    "holdings,hts",
+    "strategy,holdings,hts",
     [
-        (["v.1", "v.2"], {"v.1": True, "v.2": True, "v.3": False}),
-        (["v.1 1991", "v.2 1992"], {"v.1": True, "v.2": True, "v.3": False}),
-        (["1991", "1992"], {"1991-1992": True, "1993": False}),
-    ],
-)
-def test_single_range_match_strategy(holdings, hts):
-    holdings_enumcrons = [hfi.extract_enumcron(holding) for holding in holdings]
-    ht_enumcrons = {hfi.extract_enumcron(ht): match for ht, match in hts.items()}
-
-    assert hfi.single_range_match_strategy(holdings_enumcrons, list(ht_enumcrons)) == {
-        ht_enumcron for ht_enumcron, match in ht_enumcrons.items() if match
-    }
-
-
-@pytest.mark.parametrize(
-    "holdings,hts",
-    [
-        (["v.1", "v.2"], {"v.1": True, "v.2": True, "v.3": False}),
         (
+            hfi.single_range_match_strategy,
+            ["v.1", "v.2"],
+            {("v.1",): (0,), ("v.2",): (1,), ("v.3",): (None,)},
+        ),
+        (
+            hfi.single_range_match_strategy,
+            ["v.1 1991", "v.2 1992"],
+            {("v.1",): (0,), ("v.2",): (1,), ("v.3",): (None,)},
+        ),
+        (
+            hfi.single_range_match_strategy,
+            ["1991", "1992"],
+            {("1991-1992",): (0, 1), ("1993",): (None,)},
+        ),
+        (
+            hfi.double_range_match_strategy,
+            ["v.1", "v.2"],
+            {("v.1",): (0,), ("v.2",): (1,), ("v.3",): (None,)},
+        ),
+        (
+            hfi.double_range_match_strategy,
             ["v.1 pt.1", "v.1 pt.2"],
-            {"v.1 pt.1": True, "v.1 pt.2": True, "v.1 pt.3": False},
+            {("v.1 pt.1",): (0,), ("v.1 pt.2",): (1,), ("v.1 pt.3",): (None,)},
         ),
         (
+            hfi.double_range_match_strategy,
             ["no.1 pt.1", "no.2 pt.1", "no.2 pt.2"],
-            {"no.1 pt.1": True, "no.2": False, "no.3": False},
+            {("no.1 pt.1",): (0,), ("no.2",): (None,), ("no.3",): (None,)},
         ),
     ],
 )
-def test_double_range_match_strategy(holdings, hts):
+def test_range_match_strategy(strategy, holdings, hts):
     holdings_enumcrons = [hfi.extract_enumcron(holding) for holding in holdings]
-    ht_enumcrons = {hfi.extract_enumcron(ht): match for ht, match in hts.items()}
-
-    assert hfi.double_range_match_strategy(holdings_enumcrons, list(ht_enumcrons)) == {
-        ht_enumcron for ht_enumcron, match in ht_enumcrons.items() if match
+    extracted_matches = {
+        tuple(hfi.extract_enumcron(ht) for ht in ht_enumcrons): match_indexs
+        for ht_enumcrons, match_indexs in hts.items()
     }
+
+    matches = collections.defaultdict(set)
+    for ht_enumcrons, match_indexes in extracted_matches.items():
+        if len(ht_enumcrons) == 1:
+            for index in match_indexes:
+                if index is not None:
+                    matches[holdings_enumcrons[index]].add(ht_enumcrons[0])
+        elif len(match_indexes) == 1:
+            for ht_enumcron in ht_enumcrons:
+                matches[holdings_enumcrons[index]].add(ht_enumcron)
+        else:
+            raise ValueError("malformed many-to-many test case")
+
+    ht_enumcrons_set = set()
+    for ht_enumcrons in extracted_matches:
+        ht_enumcrons_set.update(ht_enumcrons)
+
+    assert strategy(holdings_enumcrons, ht_enumcrons_set) == matches
 
 
 @pytest.mark.parametrize(
@@ -94,15 +116,21 @@ def test_filled_range_counts(enumcrons, count):
         ("pt. 1", hfi.Enumcron(partspan=(1, 1))),
         (
             "1900",
-            hfi.Enumcron(datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31))),
+            hfi.Enumcron(
+                datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31))
+            ),
         ),
         (
             "1926-27",
-            hfi.Enumcron(datespan=(datetime.date(1926, 1, 1), datetime.date(1927, 12, 31))),
+            hfi.Enumcron(
+                datespan=(datetime.date(1926, 1, 1), datetime.date(1927, 12, 31))
+            ),
         ),
         (
             "2002-2003",
-            hfi.Enumcron(datespan=(datetime.date(2002, 1, 1), datetime.date(2003, 12, 31))),
+            hfi.Enumcron(
+                datespan=(datetime.date(2002, 1, 1), datetime.date(2003, 12, 31))
+            ),
         ),
         (
             "v.1, 1900",
