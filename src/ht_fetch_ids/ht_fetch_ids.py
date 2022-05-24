@@ -405,25 +405,6 @@ def translate_to_english(enumcron: str) -> str:
     return translated
 
 
-assert extract_enumcron("v.1") == Enumcron(volumespan=(1, 1))
-assert extract_enumcron("v. 1") == Enumcron(volumespan=(1, 1))
-assert extract_enumcron("V. 123") == Enumcron(volumespan=(123, 123))
-assert extract_enumcron("NO. 1") == Enumcron(numberspan=(1, 1))
-assert extract_enumcron("pt. 1") == Enumcron(partspan=(1, 1))
-assert extract_enumcron("1900") == Enumcron(
-    datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31))
-)
-assert extract_enumcron("1926-27") == Enumcron(
-    datespan=(datetime.date(1926, 1, 1), datetime.date(1927, 12, 31))
-)
-assert extract_enumcron("2002-2003") == Enumcron(
-    datespan=(datetime.date(2002, 1, 1), datetime.date(2003, 12, 31))
-)
-assert extract_enumcron("v.1, 1900") == Enumcron(
-    volumespan=(1, 1), datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31))
-)
-
-
 def pick_group(groups: dict[tuple[str, str], list[Item]]) -> list[Item]:
     if not groups:
         return []
@@ -479,13 +460,6 @@ def zap_copy_number(enumcron: str) -> Union[str, bool]:
     return zapped if zapped.strip("[](){}<>, -") else False
 
 
-assert zap_copy_number("c.1 v.2") == "v.2"
-assert zap_copy_number("copy 2") == False
-assert zap_copy_number("[copy 2]") == False
-assert zap_copy_number("c.2") == False
-assert zap_copy_number("Dec 1999") == "Dec 1999"
-
-
 def search_ht(
     oclc: Optional[str], lccn: Optional[str], isns: list[str], session: requests.Session
 ) -> Optional[dict[str, Any]]:
@@ -525,12 +499,6 @@ def search_for_isn(value: str) -> tuple[str, str]:
     if match := re.search(r"[0-9]{9}[0-9xX]", value):
         return match.group(), "isbn"
     raise ValueError("no valid ISBN/ISSN found")
-
-
-assert search_for_isn("1234-456x") == ("1234-456x", "issn")
-assert search_for_isn("123456789x") == ("123456789x", "isbn")
-assert search_for_isn("1234567890 extra") == ("1234567890", "isbn")
-assert search_for_isn("before 123456789012x") == ("123456789012x", "isbn")
 
 
 def search_for_lccn(value: str) -> str:
@@ -579,11 +547,6 @@ def _split_repeated_values(
     values_list[0] = values_list[0].lstrip(text_qualifier)
     values_list[-1] = values_list[-1].rstrip(text_qualifier)
     return values_list if values_list[0] else []
-
-
-assert _split_repeated_values('"1"', '"', ";") == ["1"]
-assert _split_repeated_values('"1";"2";"3"', '"', ";") == ["1", "2", "3"]
-assert _split_repeated_values("", '"', ";") == []
 
 
 class SierraExportReader(collections.abc.Iterable):

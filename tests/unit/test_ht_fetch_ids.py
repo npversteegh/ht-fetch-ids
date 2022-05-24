@@ -83,3 +83,80 @@ def test_make_range_set(enumcron, attrs, result):
 )
 def test_filled_range_counts(enumcrons, count):
     assert dict(hfi.filled_range_counts(enumcrons)) == count
+
+
+@pytest.mark.parametrize(
+    "raw,extracted",
+    [
+        ("v.1", hfi.Enumcron(volumespan=(1, 1))),
+        ("V. 123", hfi.Enumcron(volumespan=(123, 123))),
+        ("NO. 1", hfi.Enumcron(numberspan=(1, 1))),
+        ("pt. 1", hfi.Enumcron(partspan=(1, 1))),
+        (
+            "1900",
+            hfi.Enumcron(datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31))),
+        ),
+        (
+            "1926-27",
+            hfi.Enumcron(datespan=(datetime.date(1926, 1, 1), datetime.date(1927, 12, 31))),
+        ),
+        (
+            "2002-2003",
+            hfi.Enumcron(datespan=(datetime.date(2002, 1, 1), datetime.date(2003, 12, 31))),
+        ),
+        (
+            "v.1, 1900",
+            hfi.Enumcron(
+                volumespan=(1, 1),
+                datespan=(datetime.date(1900, 1, 1), datetime.date(1900, 12, 31)),
+            ),
+        ),
+    ],
+)
+def test_extract_enumcron(raw, extracted):
+    assert hfi.extract_enumcron(raw) == extracted
+
+
+@pytest.mark.parametrize(
+    "raw,zapped",
+    [
+        ("c.1 v.2", "v.2"),
+        ("copy 2", False),
+        ("[copy 2]", False),
+        ("c.2", False),
+        ("Dec 1999", "Dec 1999"),
+    ],
+)
+def test_zap_copy_number(raw, zapped):
+    assert hfi.zap_copy_number(raw) == zapped
+
+
+@pytest.mark.parametrize(
+    "raw,extracted",
+    [
+        ("1234-456x", ("1234-456x", "issn")),
+        ("123456789x", ("123456789x", "isbn")),
+        ("1234567890 extra", ("1234567890", "isbn")),
+        ("before 123456789012x", ("123456789012x", "isbn")),
+    ],
+)
+def test_search_for_isn(raw, extracted):
+    assert hfi.search_for_isn(raw) == extracted
+
+
+@pytest.mark.parametrize(
+    "values,results",
+    [
+        ('"1"', ["1"]),
+        ('"1";"2";"3"', ["1", "2", "3"]),
+        ("", []),
+        ('"1;";"2"', ["1;", "2"]),
+    ],
+)
+def test__split_repeated_values(values, results):
+    assert (
+        hfi._split_repeated_values(
+            values, text_qualifier='"', repeated_field_delimiter=";"
+        )
+        == results
+    )
