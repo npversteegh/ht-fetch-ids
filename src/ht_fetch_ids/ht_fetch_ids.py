@@ -11,6 +11,7 @@ import io
 import datetime
 import functools
 import itertools
+import math
 from pathlib import Path
 
 from typing import (
@@ -38,12 +39,12 @@ BriefRecord = collections.namedtuple(
 
 @dataclasses.dataclass(frozen=True)
 class Enumcron:
-    volumespan: Optional[tuple[int, int]] = None
-    partspan: Optional[tuple[int, int]] = None
-    numberspan: Optional[tuple[int, int]] = None
     seriesspan: Optional[tuple[int, int]] = dataclasses.field(
         default=None, compare=False
     )
+    volumespan: Optional[tuple[int, int]] = None
+    numberspan: Optional[tuple[int, int]] = None
+    partspan: Optional[tuple[int, int]] = None
     datespan: Optional[tuple[int, int]] = None
     copyspan: Optional[tuple[int, int]] = dataclasses.field(default=None, compare=False)
     is_index: bool = False
@@ -54,11 +55,19 @@ class Enumcron:
 
 MatchStrategy = Callable[[set[Enumcron], set[Enumcron]], dict[Enumcron, set[Enumcron]]]
 MATCH_STRATEGIES: dict[str, MatchStrategy] = dict()
+SPAN_ORDER = [
+    "seriesspan",
+    "volumespan",
+    "numberspan",
+    "partspan",
+    "datespan",
+]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Get HathiTrust htids based on Sierra Create List exports"
+        description="Get HathiTrust htids based on Sierra Create List exports",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("export_path", type=Path, help="Path to Sierra export file")
     parser.add_argument(
@@ -77,10 +86,10 @@ def main() -> int:
         help="Sierra export repeated field delimiter",
     )
     parser.add_argument(
-        "--dialect",
+        "--output-dialect",
         choices=csv.list_dialects(),
-        default="unix",
-        help="Results CSV format",
+        default="excel-tab",
+        help="Output CSV format",
     )
     parser.add_argument(
         "--delay", type=int, default=0, help="Seconds of delay between HT API requests"
@@ -137,7 +146,7 @@ def main() -> int:
             + ["ht-recordURLs", "enumcrons", "group-counts"]
             + (["volume-match-pct", "enumcron-matches"] if args.vol_matcher else [])
             + ["htids"],
-            dialect="excel-tab",
+            dialect=args.output_dialect,
         )
         writer.writeheader()
 
@@ -251,37 +260,38 @@ def exact_match_strategy(
 ) -> dict[Enumcron, set[Enumcron]]:
     ht_enumcrons_dict = {ht_enumcron: ht_enumcron for ht_enumcron in ht_enumcrons}
     return {
-        holding: {ht_enumcrons_dict[ht_enumcron]}
+        holding: {ht_enumcrons_dict[holding]}
         for holding in holdings
         if holding in ht_enumcrons_dict
     }
 
 
-def ranges_matcher(
+@match_strategy("1-span")
+def single_span_match_strategy(
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
+) -> dict[Enumcron, set[Enumcron]]:
+    return spans_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=1)
+
+
+@match_strategy("2-span")
+def double_span_match_strategy(
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
+) -> dict[Enumcron, set[Enumcron]]:
+    return spans_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=2)
+
+
+def spans_matcher(
     holdings: set[Enumcron], ht_enumcrons: set[Enumcron], n: int
 ) -> dict[Enumcron, set[Enumcron]]:
-    holdings_range_percents = counts_to_percents(
-        filled_range_counts(holdings), len(holdings)
-    )
-    ht_range_percents = counts_to_percents(
-        filled_range_counts(ht_enumcrons), len(ht_enumcrons)
-    )
-    mutual_range_attrs = set(holdings_range_percents) & set(ht_range_percents)
-    mutual_percents = {
-        attr: holdings_range_percents[attr] + ht_range_percents[attr]
-        for attr in mutual_range_attrs
-    }
-    match_on = [
-        attr[0] for attr in sorted(mutual_percents.items(), key=lambda tpl: tpl[1])
-    ][-n:]
+    match_on = guess_mutual_spans(holdings=holdings, ht_enumcrons=ht_enumcrons, n=n)
 
     holdings_by_key = dict()
     for holding in holdings:
-        holdings_by_key.update(make_range_dict(holding, match_on))
+        holdings_by_key.update(make_spans_dict(holding, match_on))
 
     ht_enumcrons_by_key = dict()
     for ht_enumcron in ht_enumcrons:
-        ht_enumcrons_by_key.update(make_range_dict(ht_enumcron, match_on))
+        ht_enumcrons_by_key.update(make_spans_dict(ht_enumcron, match_on))
 
     matches = collections.defaultdict(set)
     for key in set(holdings_by_key) & set(ht_enumcrons_by_key):
@@ -290,50 +300,38 @@ def ranges_matcher(
     return dict(matches)
 
 
-@match_strategy("1-range")
-def single_range_match_strategy(
-    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
-) -> dict[Enumcron, set[Enumcron]]:
-    return ranges_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=1)
-
-
-@match_strategy("2-range")
-def double_range_match_strategy(
-    holdings: set[Enumcron], ht_enumcrons: set[Enumcron]
-) -> dict[Enumcron, set[Enumcron]]:
-    return ranges_matcher(holdings=holdings, ht_enumcrons=ht_enumcrons, n=2)
-
-
-def make_range_dict(
-    enumcron: Enumcron, attrs: Sequence[str]
-) -> dict[tuple[int, ...], Enumcron]:
-    return {key: enumcron for key in make_range_set(enumcron, attrs=attrs)}
-
-
-def make_range_set(enumcron: Enumcron, attrs: Sequence[str]) -> set[tuple[int, ...]]:
-    ranges = []
-    for attr in attrs:
-        value = getattr(enumcron, attr)
-        if not value:
-            ranges.append([None])
-            continue
-        start, end = value
-        if isinstance(start, datetime.date) or isinstance(end, datetime.date):
-            start, end = start.year, end.year
-        ranges.append(range(start, end + 1))
-    return set(itertools.product(*ranges))
-
-
-def filled_range_counts(enumcrons: Iterable[Enumcron]) -> collections.Counter:
-    attrs = {
-        "volumespan",
-        "partspan",
-        "numberspan",
-        "seriesspan",
-        "datespan",
+def guess_mutual_spans(
+    holdings: set[Enumcron], ht_enumcrons: set[Enumcron], n: int
+) -> list[str]:
+    holdings_span_percents = counts_to_percents(
+        filled_span_counts(holdings), len(holdings)
+    )
+    ht_span_percents = counts_to_percents(
+        filled_span_counts(ht_enumcrons), len(ht_enumcrons)
+    )
+    mutual_span_attrs = set(holdings_span_percents) & set(ht_span_percents)
+    mutual_percents = {
+        attr: holdings_span_percents[attr] + ht_span_percents[attr]
+        for attr in mutual_span_attrs
     }
+    sorted_mutual_spans = sorted(
+        mutual_percents.items(), key=lambda tpl: tpl[1], reverse=True
+    )
+    grouped_mutual_spans = itertools.groupby(
+        sorted_mutual_spans, key=lambda tpl: int(tpl[1])
+    )
+    span_groups = [[span[0] for span in group] for _, group in grouped_mutual_spans]
+    ordered_span_groups = [
+        [span for span in SPAN_ORDER if span in group] for group in span_groups
+    ]
+    ordered_mutual_spans = itertools.chain.from_iterable(ordered_span_groups)
+    result = list(ordered_mutual_spans)[:n]
+    return result
+
+
+def filled_span_counts(enumcrons: Iterable[Enumcron]) -> collections.Counter:
     return collections.Counter(
-        attr for enumcron in enumcrons for attr in attrs if getattr(enumcron, attr)
+        attr for enumcron in enumcrons for attr in SPAN_ORDER if getattr(enumcron, attr)
     )
 
 
@@ -343,15 +341,42 @@ def counts_to_percents(
     return {key: (count / total) * 100 for key, count in counter.items()}
 
 
+def make_spans_dict(
+    enumcron: Enumcron, attrs: Sequence[str]
+) -> dict[tuple[Optional[int], ...], Enumcron]:
+    return {key: enumcron for key in make_spans_set(enumcron, attrs=attrs)}
+
+
+def make_spans_set(
+    enumcron: Enumcron, attrs: Sequence[str]
+) -> set[tuple[Optional[int], ...]]:
+    spans = []
+    for attr in attrs:
+        value = getattr(enumcron, attr)
+        if not value:
+            spans.append([None])
+            continue
+        start, end = value
+        if isinstance(start, datetime.date) or isinstance(end, datetime.date):
+            start, end = start.year, end.year
+        spans.append(range(start, end + 1))
+    spans_set = set(itertools.product(*spans))
+    spans_set.discard((None,) * len(attrs))
+    return spans_set
+
+
 def extract_enumcron(enumcron: str) -> Enumcron:
     if not enumcron:
         return Enumcron()
+
     asdigit = enumcron.strip(" ()")
+    # 1000 is larger than most volumes, smaller than most years
     if asdigit.isdigit() and int(asdigit) < 1000:
         volumenum = int(asdigit)
         return Enumcron(volumespan=(volumenum, volumenum), raw=enumcron)
 
-    remainder = translate_to_english(enumcron)
+    remainder = " ".join(enumcron.split())  # Remove multiple spaces
+    remainder = translate_to_english(remainder)
     remainder, volumespan = extract_volumespan(remainder)
     remainder, partspan = extract_partspan(remainder)
     remainder, numberspan = extract_numberspan(remainder)
@@ -439,7 +464,7 @@ def extract_simple_span(
 
 
 def extract_is_index(enumcron: str) -> tuple[str, bool]:
-    remainder, match = search_and_remove(r"(index:?)", enumcron)
+    remainder, match = search_and_remove(r"(inde?x:?)", enumcron)
     return remainder, bool(match)
 
 

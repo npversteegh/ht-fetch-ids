@@ -10,38 +10,48 @@ from ht_fetch_ids import ht_fetch_ids as hfi
     "strategy,holdings,hts",
     [
         (
-            hfi.single_range_match_strategy,
+            hfi.exact_match_strategy,
+            ["v.1", "v.2"],
+            {("v.1",): (0,), ("v.3",): (None,)},
+        ),
+        (
+            hfi.single_span_match_strategy,
             ["v.1", "v.2"],
             {("v.1",): (0,), ("v.2",): (1,), ("v.3",): (None,)},
         ),
         (
-            hfi.single_range_match_strategy,
+            hfi.single_span_match_strategy,
+            ["v.1", "no.2"],
+            {("v.1",): (0,), ("v.2",): (None,), ("no.2",): (None,)},
+        ),
+        (
+            hfi.single_span_match_strategy,
             ["v.1 1991", "v.2 1992"],
             {("v.1",): (0,), ("v.2",): (1,), ("v.3",): (None,)},
         ),
         (
-            hfi.single_range_match_strategy,
+            hfi.single_span_match_strategy,
             ["1991", "1992"],
             {("1991-1992",): (0, 1), ("1993",): (None,)},
         ),
         (
-            hfi.double_range_match_strategy,
+            hfi.double_span_match_strategy,
             ["v.1", "v.2"],
             {("v.1",): (0,), ("v.2",): (1,), ("v.3",): (None,)},
         ),
         (
-            hfi.double_range_match_strategy,
+            hfi.double_span_match_strategy,
             ["v.1 pt.1", "v.1 pt.2"],
             {("v.1 pt.1",): (0,), ("v.1 pt.2",): (1,), ("v.1 pt.3",): (None,)},
         ),
         (
-            hfi.double_range_match_strategy,
+            hfi.double_span_match_strategy,
             ["no.1 pt.1", "no.2 pt.1", "no.2 pt.2"],
             {("no.1 pt.1",): (0,), ("no.2",): (None,), ("no.3",): (None,)},
         ),
     ],
 )
-def test_range_match_strategy(strategy, holdings, hts):
+def test_match_strategy(strategy, holdings, hts):
     holdings_enumcrons = [hfi.extract_enumcron(holding) for holding in holdings]
     extracted_matches = {
         tuple(hfi.extract_enumcron(ht) for ht in ht_enumcrons): match_indexs
@@ -59,12 +69,42 @@ def test_range_match_strategy(strategy, holdings, hts):
                 matches[holdings_enumcrons[index]].add(ht_enumcron)
         else:
             raise ValueError("malformed many-to-many test case")
+    matches = dict(matches)
 
     ht_enumcrons_set = set()
     for ht_enumcrons in extracted_matches:
         ht_enumcrons_set.update(ht_enumcrons)
 
     assert strategy(holdings_enumcrons, ht_enumcrons_set) == matches
+
+
+@pytest.mark.parametrize(
+    "holdings,hts,n,result",
+    [
+        (["v.1", "v.2"], ["v.1", "v.2"], 1, ["volumespan"]),
+        (["v.1", "v.2"], ["v.1", "no.2"], 1, ["volumespan"]),
+        (["v.1", "v.2"], ["no.1", "no.2"], 1, []),
+        (["v.1", "v.2", "no.3"], ["v.1", "no.2"], 1, ["volumespan"]),
+        (["v.1 pt.1", "v.1 pt.2"], ["v.1 pt.1", "v.2 pt.2"], 1, ["volumespan"]),
+        (
+            ["v.1 pt.1", "v.1 pt.2"],
+            ["v.1 pt.1", "v.2 pt.2"],
+            2,
+            ["volumespan", "partspan"],
+        ),
+        (["2001", "2002"], ["1998", "1999"], 1, ["datespan"]),
+        (["v.1 2002", "v.2 2003"], ["v.1", "2002"], 2, ["volumespan", "datespan"]),
+    ],
+)
+def test_guess_mutual_spans(holdings, hts, n, result):
+    assert (
+        hfi.guess_mutual_spans(
+            holdings=[hfi.extract_enumcron(holding) for holding in holdings],
+            ht_enumcrons=[hfi.extract_enumcron(ht) for ht in hts],
+            n=n,
+        )
+        == result
+    )
 
 
 @pytest.mark.parametrize(
@@ -86,8 +126,8 @@ def test_range_match_strategy(strategy, holdings, hts):
         ),
     ],
 )
-def test_make_range_set(enumcron, attrs, result):
-    assert hfi.make_range_set(enumcron, attrs=attrs) == result
+def test_make_spans_set(enumcron, attrs, result):
+    assert hfi.make_spans_set(enumcron, attrs=attrs) == result
 
 
 @pytest.mark.parametrize(
@@ -103,8 +143,8 @@ def test_make_range_set(enumcron, attrs, result):
         ),
     ],
 )
-def test_filled_range_counts(enumcrons, count):
-    assert dict(hfi.filled_range_counts(enumcrons)) == count
+def test_filled_span_counts(enumcrons, count):
+    assert dict(hfi.filled_span_counts(enumcrons)) == count
 
 
 @pytest.mark.parametrize(
