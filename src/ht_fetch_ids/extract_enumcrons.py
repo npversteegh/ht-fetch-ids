@@ -5,7 +5,7 @@ import dataclasses
 
 from pathlib import Path
 
-import ht_fetch_ids
+from ht_fetch_ids import ht_fetch_ids
 
 
 def main() -> int:
