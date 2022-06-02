@@ -2,7 +2,7 @@
 ht-fetch-ids
 ============
 
-ht-fetch-ids is a set of Python command line tools for reconciling tabular files of bibliographic identifiers to HathiTrust volume IDs using the `HathiTrust Bibliographic API <https://www.hathitrust.org/bib_api>`_ intended to automate the creation of HathiTrust Research Center `Worksets <https://analytics.hathitrust.org/staticworksets>`_ based on Innovative Sierra catalog searches. It takes delimited multi-value tables of OCLC, LCCN, and ISBN/ISSN identifiers exported from Innovative Sierra using its `Create Lists <https://innovative.libguides.com/sierra/reports>`_ feature and prints the resulting matches to ``stdout`` in the CSV flavor of the user's choice.
+ht-fetch-ids is a package of Python command line tools for reconciling tabular files of bibliographic identifiers to HathiTrust volume IDs using the `HathiTrust Bibliographic API <https://www.hathitrust.org/bib_api>`_. It is intended to automate the creation of HathiTrust Research Center `Worksets <https://analytics.hathitrust.org/staticworksets>`_ based on Innovative Sierra catalog searches. It takes column-delimited multi-cell-value files of OCLC, LCCN, and ISBN/ISSN identifiers exported from Sierra using its `Create Lists <https://innovative.libguides.com/sierra/reports>`_ reporting feature and prints the resulting matches to ``stdout`` in the CSV flavor of the user's choice.
 
 Installation
 ============
@@ -34,7 +34,7 @@ Once ht-fetch-ids is installed you should have ``ht-fetch-ids``, ``print-col``, 
 Usage
 =====
 
-First, you'll need a Sierra Create Lists export CSV of bibliographic identifiers to reconcile against HathiTrust::
+First, you'll need a Sierra Create Lists export file of bibliographic identifiers to reconcile against HathiTrust. ht-fetch-ids defaults to using tab (control character 9) as the field delimiter, ``"`` (double quote) as the text qualifier, and ``;`` (semicolon) as the repeated field delimiter:::
 
   RECORD #(Bibliographic)	OCLC #	LC CARD #	ISBN/ISSN	TITLE	VOLUME
   "b10005651"	"637568"	"02017400"		"A complete history of Fairfield County, Ohio : 1795-1876 / by Hervey Scott"	
@@ -61,7 +61,29 @@ Example usage:
 
    ht-fetch-ids --http-cache http-cache --vol-matcher 2-span sierra-export.txt > results.tsv
 
-Once results have been obtained they can be dumped to a text file suitable for creating a HathiTrust Research Center Workset using ``print-col``
+The results are the input file columns translated into the output CSV format along with:
+
+``ht-recordURLs``
+  The HathiTrust record(s) the identifier(s) were matched to, if any.
+
+``enumcrons``
+  A de-duplicated list of enumcrons attached to the HathiTrust item records.
+
+``group-counts``
+  The number of volumes attached to each record from each contributing library.
+
+``htids``
+  The reconciled HathiTrust volume IDs.
+
+If a volume matcher was provided the following columns are also included:
+
+``volume-match-pct``
+  The percent of de-duplicated provided volume labels that were matched to HathiTrust enumcrons.
+
+``enumcron-matches``
+  A list of which volume labels were matched to which enumcron strings.
+
+Once results have been obtained they can be dumped to a text file suitable for creating a HathiTrust Research Center Workset using ``print-col``:
 
 .. code-block::
 
@@ -71,14 +93,14 @@ To see what kind of coverage the regular expressions are getting from the enumcr
 
 .. code-block::
 
-   print-col results.tsv enumcrons > enumcrons.txt
+   print-col results.tsv "enumcrons" > enumcrons.txt
    extract-enumcrons enumcrons.txt > extracted-enumcrons.txt
 
 or even simpler:
 
 .. code-block::
 
-   print-col results.tsv | extract-enumcrons > extracted-enumcrons.txt
+   print-col results.tsv "enumcrons" | extract-enumcrons > extracted-enumcrons.txt
 
 which will show what spans are extracted from each enumcron or volume label::
 
