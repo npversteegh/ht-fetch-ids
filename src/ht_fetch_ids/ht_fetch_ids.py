@@ -11,7 +11,6 @@ import io
 import datetime
 import functools
 import itertools
-import math
 from pathlib import Path
 
 from typing import (
