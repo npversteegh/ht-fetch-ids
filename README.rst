@@ -7,13 +7,13 @@ ht-fetch-ids is a package of Python command line tools for reconciling bibliogra
 Installation
 ============
 
-To run ht-fetch-ids you'll need Python 3.9 or later available in a command line shell. ht-fetch-ids can be installed using pip directly from this GitHub page:
+To run ht-fetch-ids you'll need Python 3.9 or later available in a command line interface that supports UTF-8 (unconfigured Git bash on Windows won't work). ht-fetch-ids can be installed using pip directly from this GitHub page:
 
 .. code-block::
 
    python -m pip install git+https://github.com/npversteegh/ht-fetch-ids@main
 
-It's a good idea to install it in a Python virtual environment to prevent future conflicts. An example of doing this using Git bash on Windows might look like:
+It's a good idea to install it in a Python virtual environment to prevent future conflicts. An example of doing this on Windows might look like:
 
 .. code-block::
 
@@ -87,7 +87,7 @@ Once results have been obtained they can be dumped to a text file suitable for c
 
 .. code-block::
 
-   print-col --with-new-name "volume" results.tsv "htids" > workset.txt
+   print-col --with-new-name volume results.tsv htids > workset.txt
 
 Development
 ===========
@@ -106,14 +106,7 @@ ht-fetch-ids has a small suite of pytest tests and uses black for formatting. Yo
 
 .. code-block::
 
-   print-col results.tsv "enumcrons" > enumcrons.txt
-   extract-enumcrons enumcrons.txt > extracted-enumcrons.txt
-
-or even simpler:
-
-.. code-block::
-
-   print-col results.tsv "enumcrons" | extract-enumcrons | less
+   print-col results.tsv enumcrons | sort | uniq | extract-enumcrons > extracted-enumcrons.tsv
 
 which will show what spans are extracted from each enumcron or volume label::
 
