@@ -2,7 +2,7 @@
 ht-fetch-ids
 ============
 
-ht-fetch-ids is a package of Python command line tools for reconciling tabular files of bibliographic identifiers to HathiTrust volume IDs using the `HathiTrust Bibliographic API <https://www.hathitrust.org/bib_api>`_. It is intended to automate the creation of HathiTrust Research Center `Worksets <https://analytics.hathitrust.org/staticworksets>`_ based on Innovative Sierra catalog searches. It takes column-delimited multi-cell-value files of OCLC, LCCN, and ISBN/ISSN identifiers exported from Sierra using its `Create Lists <https://innovative.libguides.com/sierra/reports>`_ reporting feature and prints the resulting matches to ``stdout`` in the CSV flavor of the user's choice.
+ht-fetch-ids is a package of Python command line tools for reconciling bibliographic identifiers to HathiTrust volume IDs using the `HathiTrust Bibliographic API <https://www.hathitrust.org/bib_api>`_. It is intended to automate the creation of HathiTrust Research Center `Worksets <https://analytics.hathitrust.org/staticworksets>`_ based on Innovative Sierra integrated library system catalog searches. It takes column-delimited multi-cell-value files of OCLC, LCCN, and ISBN/ISSN identifiers exported from Sierra using its `Create Lists <https://innovative.libguides.com/sierra/reports>`_ reporting feature and prints the resulting matches to ``stdout`` in the CSV flavor of the user's choice.
 
 Installation
 ============
@@ -13,7 +13,7 @@ To run ht-fetch-ids you'll need Python 3.9 or later available in a command line 
 
    python -m pip install git+https://github.com/npversteegh/ht-fetch-ids@main
 
-It's a good idea to install it in a Python virtual environment to prevent future conflicts. An example of doing this using Git Bash on Windows might look like:
+It's a good idea to install it in a Python virtual environment to prevent future conflicts. An example of doing this using Git bash on Windows might look like:
 
 .. code-block::
 
@@ -53,7 +53,7 @@ in that order. By default it will take all volumes held by the library that has 
 * ``1-span`` which requires that each volume match on the span with the highest percent coverage between the volume column labels and HathiTrust enumcrons
 * ``2-span`` which requires that each volume match on the top two spans with the highest percent coverage between the volume column labels and HathiTrust enumcrons
 
-``ht-fetch-ids`` has a ``--http-cache`` option to create a sqlite cache of HTTP requests that it can run against multiples times and a ``--delay`` option to reduce load on the HT API.
+``ht-fetch-ids`` has a ``--delay`` option that takes an integer seconds input to reduce load on the HT API.
 
 Example usage:
 
@@ -61,13 +61,13 @@ Example usage:
 
    ht-fetch-ids --http-cache http-cache --vol-matcher 2-span sierra-export.txt > results.tsv
 
-The results are the input file columns translated into the output CSV format along with:
+The results are the input file columns translated into the output CSV format with multiple values joined using ``; ``  with added columns:
 
 ``ht-recordURLs``
   The HathiTrust record(s) the identifier(s) were matched to, if any.
 
 ``enumcrons``
-  A de-duplicated list of enumcrons attached to the HathiTrust item records.
+  A de-duplicated list of enumcron strings attached to the HathiTrust item records.
 
 ``group-counts``
   The number of volumes attached to each record from each contributing library.
@@ -89,7 +89,19 @@ Once results have been obtained they can be dumped to a text file suitable for c
 
    print-col --with-new-name "volume" results.tsv "htids" > workset.txt
 
-To see what kind of coverage the regular expressions are getting from the enumcrons, you can ``print-col`` the enumcrons or volume labels from the results CSV to a text file and run ``extract-enumcrons`` on it:
+Development
+===========
+
+ht-fetch-ids has a small suite of pytest tests and uses black for formatting. You can install the development dependencies with the ``dev`` extra. Creating an editable installation in a virtual environment on Windows might look like:
+
+.. code-block::
+   git clone https://github.com/npversteegh/ht-fetch-ids
+   cd ht-fetch-ids
+   python -m venv ht-fetch-ids
+   source ht-fetch-ds/Scripts/activate
+   python -m pip install -e .[dev]
+
+``ht-fetch-ids`` has an ``--http-cache`` option that uses `requests_cache <https://github.com/requests-cache/requests-cache>`_ to create a sqlite cache of HTTP requests that it can run against multiple times during development. An included ``extract-enumcrons`` script is intended to show what kind of coverage the regular expressions are getting from the HathiTrust enumcrons. You can ``print-col`` the enumcrons or volume labels from the results CSV to a text file and run ``extract-enumcrons`` on it:
 
 .. code-block::
 
@@ -100,7 +112,7 @@ or even simpler:
 
 .. code-block::
 
-   print-col results.tsv "enumcrons" | extract-enumcrons > extracted-enumcrons.txt
+   print-col results.tsv "enumcrons" | extract-enumcrons | less
 
 which will show what spans are extracted from each enumcron or volume label::
 
@@ -108,3 +120,5 @@ which will show what spans are extracted from each enumcron or volume label::
   1901-1933 v.4 pt.1		(4, 4)		(1, 1)	(datetime.date(1901, 1, 1), datetime.date(1933, 12, 31))		False	False		1901-1933 v.4 pt.1
   Ser.2 v.17 (1891)	(2, 2)	(17, 17)			(datetime.date(1891, 1, 1), datetime.date(1891, 12, 31))		False	False		Ser.2 v.17 (1891)
   eastern division							False	False	eastern division	eastern division
+
+`Visidata <https://www.visidata.org/>`_ is very handy for displaying tabular files like these in the terminal.
