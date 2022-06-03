@@ -49,19 +49,19 @@ The ``ht-fetch-ids`` command will take this file as input and try to match it ag
 
 in that order. By default it will take all volumes held by the library that has contributed the most volumes to HathiTrust using the most recent update to break ties. If the ``--vol-matcher`` option is specified ht-fetch-ids will try to match provided volume labels against HathiTrust volume labels (called enumcrons) using regular expressions and dead reckoning. It will extract series, part, volume, number, copy, and date spans from enumcron and volume strings then try to match them using the selected matcher. As of the time of last update three matchers have been drafted:
 
-* ``exact`` which requires that the normalized volume labels match exactly (e.g. ``V1`` = ``Vol.1``, but ``V.1 NO.1`` != ``V.1``)
+* ``exact`` which requires that the normalized volume labels match exactly (e.g. ``V1`` = ``Vol.1``, but ``V.1 NO.1`` ≠ ``V.1``)
 * ``1-span`` which requires that each volume match on the span with the highest percent coverage between the volume column labels and HathiTrust enumcrons
 * ``2-span`` which requires that each volume match on the top two spans with the highest percent coverage between the volume column labels and HathiTrust enumcrons
 
-``ht-fetch-ids`` has a ``--delay`` option that takes an integer seconds input to reduce load on the HT API.
+``ht-fetch-ids`` has a ``--delay`` option that takes an integer seconds value to reduce load on the HT API.
 
 Example usage:
 
 .. code-block::
 
-   ht-fetch-ids --http-cache http-cache --vol-matcher 2-span sierra-export.txt > results.tsv
+   ht-fetch-ids --delay 1 --vol-matcher 2-span sierra-export.txt > results.tsv
 
-The results are the input file columns translated into the output CSV format with multiple values joined using ``; ``  with added columns:
+The results are the input file columns translated into the output CSV format with multiple values joined using ``; ``  with added columns:
 
 ``ht-recordURLs``
   The HathiTrust record(s) the identifier(s) were matched to, if any.
@@ -95,6 +95,7 @@ Development
 ht-fetch-ids has a small suite of pytest tests and uses black for formatting. You can install the development dependencies with the ``dev`` extra. Creating an editable installation in a virtual environment on Windows might look like:
 
 .. code-block::
+
    git clone https://github.com/npversteegh/ht-fetch-ids
    cd ht-fetch-ids
    python -m venv ht-fetch-ids
