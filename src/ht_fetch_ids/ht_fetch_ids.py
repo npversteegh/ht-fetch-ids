@@ -228,11 +228,6 @@ def pick_volumes(
         ht_enumcrons[ht_enumcron] = item
 
     matches = strategy(set(held_enumcrons), set(ht_enumcrons))
-    if len(matches) < len(held_enumcrons):
-        print(
-            f"Missed {len(held_enumcrons) - len(matches)} volumes of {len(held_enumcrons)}",
-            file=sys.stderr,
-        )
     return (
         [
             ht_enumcrons[ht_enumcron]
@@ -518,20 +513,10 @@ def dedupe_enumcron(items: Iterable[Item]) -> list[Item]:
     volumes = dict()
     for item in items:
         normalcron = normalize_enumcron(item.enumcron)
-        if normalcron != item.enumcron:
-            print(
-                f"Normalized enumcron {item.enumcron!r} --> {normalcron!r}",
-                file=sys.stderr,
-            )
         if normalcron in volumes:
             if int(item.lastUpdate) < int(volumes[normalcron].lastUpdate):
                 continue
         volumes[normalcron] = item
-    if False in volumes and len(volumes) > 1:
-        print(
-            f"Multivolume set with missing enumcrons, record {volumes[False].fromRecord}",
-            file=sys.stderr,
-        )
     return list(volumes.values())
 
 
